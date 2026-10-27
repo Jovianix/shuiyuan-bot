@@ -10,9 +10,14 @@ const profile = JSON.parse(await readFile(new URL('discourse-profile.json', root
 assert.equal(profile.site, 'https://shuiyuan.sjtu.edu.cn');
 
 const transport = new StdioClientTransport({
-  command: 'npm',
+  command: process.execPath,
   // Explicitly override the profile, even when normal MCP sessions allow writes.
-  args: ['run', '--silent', 'mcp:readonly'],
+  args: [
+    '--import', fileURLToPath(new URL('readonly-http.mjs', import.meta.url)),
+    fileURLToPath(new URL('node_modules/@discourse/mcp/dist/index.js', root)),
+    '--profile', fileURLToPath(new URL('discourse-profile.json', root)),
+    '--tools_mode', 'discourse_api_only', '--allow_writes', 'false', '--read_only', 'true',
+  ],
   cwd: fileURLToPath(root),
   stderr: 'inherit',
 });

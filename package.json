@@ -7,13 +7,18 @@
     "node": ">=24"
   },
   "scripts": {
+    "postinstall": "patch-package --error-on-fail",
+    "patch:mcp": "patch-package @discourse/mcp",
+    "test": "node --test --test-isolation=none tests/*.test.mjs",
     "auth": "node scripts/generate-user-api-key.mjs",
     "mcp": "node node_modules/@discourse/mcp/dist/index.js --profile discourse-profile.json --tools_mode discourse_api_only",
     "mcp:readonly": "node node_modules/@discourse/mcp/dist/index.js --profile discourse-profile.json --tools_mode discourse_api_only --allow_writes false --read_only true",
-    "check:mcp": "node scripts/check-mcp-readonly.mjs"
+    "check:mcp": "node scripts/check-mcp-readonly.mjs",
+    "check:mcp:patch": "node scripts/check-mcp-patch-readonly.mjs"
   },
   "dependencies": {
-    "@discourse/mcp": "0.3.1"
+    "@discourse/mcp": "0.3.1",
+    "patch-package": "8.0.1"
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "1.30.0"

@@ -1,0 +1,512 @@
+diff --git a/node_modules/@discourse/mcp/dist/tools/builtin/create_post.js b/node_modules/@discourse/mcp/dist/tools/builtin/create_post.js
+index 081fc62..5df669f 100644
+--- a/node_modules/@discourse/mcp/dist/tools/builtin/create_post.js
++++ b/node_modules/@discourse/mcp/dist/tools/builtin/create_post.js
+@@ -6,6 +6,7 @@ import { mutationError } from "./common/helpers.js";
+ const schema = z.object({
+     topic_id: z.number().int().positive(),
+     raw: z.string().min(1).max(30000),
++    reply_to_post_number: z.number().int().positive().optional().describe("Reply to this post number within the topic (not a global post ID)"),
+     author_username: z.string().optional(),
+ });
+ export const createPostTool = defineTool({
+@@ -17,7 +18,7 @@ export const createPostTool = defineTool({
+     toolsets: ["topics"],
+     handler: async (input, _extra, ctx, opts) => {
+         try {
+-            const { topic_id, raw, author_username } = schema.parse(input);
++            const { topic_id, raw, reply_to_post_number, author_username } = schema.parse(input);
+             const accessError = requireWriteAccess(ctx.siteState, opts.allowWrites);
+             if (accessError)
+                 return accessError;
+@@ -27,16 +28,19 @@ export const createPostTool = defineTool({
+             await rateLimit("post");
+             const { client } = ctx.siteState.ensureSelectedSite();
+             const payload = { topic_id, raw };
++            if (reply_to_post_number !== undefined)
++                payload.reply_to_post_number = reply_to_post_number;
+             const headers = {};
+             if (author_username && author_username.length > 0)
+                 headers["Api-Username"] = author_username;
+-            const data = (await client.post(`/posts.json`, payload, { headers }));
++            const data = await client.postNoRetry("/posts.json", payload, { headers });
+             const actualAuthor = data?.username ?? data?.post?.username ?? null;
+             const requestedAuthor = author_username || null;
+             return jsonResponse({
+                 id: data?.id || data?.post?.id,
+                 topic_id: data?.topic_id || topic_id,
+                 post_number: data?.post_number || data?.post?.post_number,
++                reply_to_post_number: data?.reply_to_post_number ?? data?.post?.reply_to_post_number ?? null,
+                 username: actualAuthor,
+                 requested_author: requestedAuthor,
+                 author_applied: requestedAuthor ? (actualAuthor ? actualAuthor.toLowerCase() === requestedAuthor.toLowerCase() : null) : null,
+@@ -49,4 +53,3 @@ export const createPostTool = defineTool({
+         }
+     },
+ });
+-//# sourceMappingURL=create_post.js.map
+\ No newline at end of file
+diff --git a/node_modules/@discourse/mcp/dist/tools/builtin/create_topic.js b/node_modules/@discourse/mcp/dist/tools/builtin/create_topic.js
+index 5b828da..830a47c 100644
+--- a/node_modules/@discourse/mcp/dist/tools/builtin/create_topic.js
++++ b/node_modules/@discourse/mcp/dist/tools/builtin/create_topic.js
+@@ -36,7 +36,7 @@ export const createTopicTool = defineTool({
+                 payload.tags = tags;
+             if (author_username && author_username.length > 0)
+                 headers["Api-Username"] = author_username;
+-            const data = await client.post(`/posts.json`, payload, { headers });
++            const data = await client.postNoRetry("/posts.json", payload, { headers });
+             const actualAuthor = data?.username ?? data?.post?.username ?? null;
+             const requestedAuthor = author_username || null;
+             return jsonResponse({
+@@ -56,4 +56,3 @@ export const createTopicTool = defineTool({
+         }
+     },
+ });
+-//# sourceMappingURL=create_topic.js.map
+\ No newline at end of file
+diff --git a/node_modules/@discourse/mcp/dist/tools/builtin/filter_topics.js b/node_modules/@discourse/mcp/dist/tools/builtin/filter_topics.js
+index 6d6ad50..f113194 100644
+--- a/node_modules/@discourse/mcp/dist/tools/builtin/filter_topics.js
++++ b/node_modules/@discourse/mcp/dist/tools/builtin/filter_topics.js
+@@ -1,4 +1,5 @@
+ import { z } from "zod";
++import { createHash } from "node:crypto";
+ import { defineTool } from "../definition.js";
+ import { jsonResponse, jsonError, zodError } from "../../util/json_response.js";
+ import { readAnnotations } from "./common/helpers.js";
+@@ -8,11 +9,19 @@ const schema = z
+     filter: z.string().optional().describe("TopicsFilter query (required for the filtered view)"),
+     view: z.enum(["filtered", "top", "hot"]).optional().default("filtered"),
+     top_period: topPeriodSchema.optional().describe("Top period (top view only; defaults to weekly)"),
+-    page: z.number().int().min(0).optional().describe("Page number (0-based, default: 0)"),
++    page: z.number().int().min(0).optional().describe("Upstream page number (0-based). For lossless continuation use meta.next_cursor instead of incrementing page."),
+     per_page: z.number().int().min(1).max(50).optional().describe("Items per page (default 20, max 50)"),
++    cursor: z.string().min(1).max(2048).optional().describe("Continuation from meta.next_cursor. Reuse the same filter/view/per_page and omit page."),
+ })
+     .strict();
+ const description = "Discover topics through a filtered, top, or hot view. Filtered uses Discourse TopicsFilter syntax; top uses Discourse's authoritative top score and defaults to weekly; hot is defined exactly as daily top (not sentiment, controversy, or real-time velocity). Returns a uniform rich topic projection and truthful pagination metadata.";
++const cursorSchema = z.object({
++    version: z.literal(1),
++    scope: z.string(),
++    page: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
++    offset: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
++    after_id: z.number().int().positive().optional(),
++}).strict();
+ function optional(value) {
+     return value === undefined ? null : value;
+ }
+@@ -67,7 +76,7 @@ export const filterTopicsTool = defineTool({
+         const parsed = schema.safeParse(input);
+         if (!parsed.success)
+             return zodError(parsed.error);
+-        const { filter, view, top_period, page = 0, per_page = 20 } = parsed.data;
++        const { filter, view, top_period, page = 0, per_page = 20, cursor } = parsed.data;
+         const trimmedFilter = filter?.trim();
+         if (view === "filtered" && !trimmedFilter) {
+             return jsonError("Validation failed", { issues: [{ path: "filter", message: "A nonblank filter is required for the filtered view" }] });
+@@ -78,21 +87,35 @@ export const filterTopicsTool = defineTool({
+         if (view !== "top" && top_period !== undefined) {
+             return jsonError("Validation failed", { issues: [{ path: "top_period", message: "top_period is only supported by the top view" }] });
+         }
++        if (cursor && parsed.data.page !== undefined) {
++            return jsonError("Validation failed", { issues: [{ path: "page", message: "Use either cursor or page, not both" }] });
++        }
+         try {
+-            const { client } = ctx.siteState.ensureSelectedSite();
++            const { base, client } = ctx.siteState.ensureSelectedSite();
++            const period = view === "filtered" ? null : view === "hot" ? "daily" : (top_period ?? "weekly");
++            const scope = createHash("sha256").update(JSON.stringify([base, view, period, trimmedFilter ?? null, per_page])).digest("hex");
++            let position = { version: 1, scope, page, offset: 0 };
++            if (cursor) {
++                try {
++                    position = cursorSchema.parse(JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")));
++                    if (position.scope !== scope)
++                        throw new Error("Cursor belongs to another query");
++                }
++                catch {
++                    return jsonError("Invalid cursor: reuse the original site, filter, view, period and per_page");
++                }
++            }
+             const params = new URLSearchParams();
+             let path;
+-            let period = null;
+             if (view === "filtered") {
+                 params.set("q", trimmedFilter);
+-                params.set("page", String(page));
++                params.set("page", String(position.page));
+                 params.set("per_page", String(per_page));
+                 path = `/filter.json?${params.toString()}`;
+             }
+             else {
+-                period = view === "hot" ? "daily" : (top_period ?? "weekly");
+                 params.set("period", period);
+-                params.set("page", String(page));
++                params.set("page", String(position.page));
+                 params.set("per_page", String(per_page));
+                 path = `/top.json?${params.toString()}`;
+             }
+@@ -100,16 +123,38 @@ export const filterTopicsTool = defineTool({
+             const list = data?.topic_list ?? data;
+             const upstreamTopics = Array.isArray(list?.topics) ? list.topics : [];
+             const hasContinuation = Boolean(list?.more_topics_url ?? list?.more_url ?? data?.more_topics_url ?? data?.more_url);
+-            const hasExtraRow = upstreamTopics.length > per_page;
+-            const results = upstreamTopics.slice(0, per_page).map(projectTopic);
++            let offset = position.offset;
++            if (position.after_id !== undefined) {
++                const anchor = upstreamTopics.findIndex((topic) => topic.id === position.after_id);
++                if (anchor < 0)
++                    return jsonError("Topic page changed; restart this query instead of skipping unseen topics");
++                offset = anchor + 1;
++            }
++            if (offset > upstreamTopics.length)
++                return jsonError("Topic page changed; restart this query");
++            const rows = upstreamTopics.slice(offset, offset + per_page);
++            const end = offset + rows.length;
++            let nextPosition = null;
++            if (end < upstreamTopics.length) {
++                if (!Number.isInteger(rows.at(-1)?.id))
++                    throw new Error("Topic response is missing an ID needed for continuation");
++                nextPosition = { version: 1, scope, page: position.page, offset: end, after_id: rows.at(-1).id };
++            }
++            else if (hasContinuation) {
++                nextPosition = { version: 1, scope, page: position.page + 1, offset: 0 };
++            }
++            const results = rows.map(projectTopic);
+             const total = authoritativeTotal(data, list);
+             const meta = {
+                 view,
+                 top_period: period,
+-                page,
++                page: position.page,
++                offset,
+                 per_page,
++                upstream_per_page: list?.per_page ?? null,
+                 returned: results.length,
+-                has_more: hasContinuation || hasExtraRow,
++                has_more: nextPosition !== null,
++                next_cursor: nextPosition ? Buffer.from(JSON.stringify(nextPosition)).toString("base64url") : null,
+             };
+             if (total !== undefined)
+                 meta.total = total;
+@@ -120,4 +165,3 @@ export const filterTopicsTool = defineTool({
+         }
+     },
+ });
+-//# sourceMappingURL=filter_topics.js.map
+\ No newline at end of file
+diff --git a/node_modules/@discourse/mcp/dist/tools/builtin/read_topic.js b/node_modules/@discourse/mcp/dist/tools/builtin/read_topic.js
+index 556522a..37d880b 100644
+--- a/node_modules/@discourse/mcp/dist/tools/builtin/read_topic.js
++++ b/node_modules/@discourse/mcp/dist/tools/builtin/read_topic.js
+@@ -27,8 +27,8 @@ export const readTopicTool = defineTool({
+             const limit = Number.isFinite(ctx.maxReadLength) ? ctx.maxReadLength : 50000;
+             for (let i = 0; i < maxBatches && fetchedPosts.length < post_limit; i++) {
+                 const url = current > 1
+-                    ? `/t/${topic_id}.json?post_number=${current}&include_raw=true`
+-                    : `/t/${topic_id}.json?include_raw=true`;
++                    ? `/t/${topic_id}.json?post_number=${current}&include_raw=true&track_visit=false`
++                    : `/t/${topic_id}.json?include_raw=true&track_visit=false`;
+                 const data = await withRateLimit(`discourse-api:${base}`, () => client.get(url), 200);
+                 if (i === 0) {
+                     topicData = data;
+@@ -53,6 +53,16 @@ export const readTopicTool = defineTool({
+                     break;
+                 current = (filtered[filtered.length - 1]?.post_number || current) + 1;
+             }
++            const visibleIds = Array.isArray(topicData?.post_stream?.stream)
++                ? [...new Set(topicData.post_stream.stream)]
++                : null;
++            const lastPost = fetchedPosts.at(-1);
++            const lastIndex = lastPost && visibleIds ? visibleIds.indexOf(lastPost.id) : -1;
++            const hasMore = lastIndex >= 0
++                ? lastIndex < visibleIds.length - 1
++                : !lastPost && (visibleIds?.length === 0 || start > topicData?.highest_post_number)
++                    ? false
++                    : null;
+             return jsonResponse({
+                 id: topic_id,
+                 title: topicData?.title || `Topic ${topic_id}`,
+@@ -60,13 +70,15 @@ export const readTopicTool = defineTool({
+                 category_id: topicData?.category_id || null,
+                 tags: Array.isArray(topicData?.tags) ? topicData.tags : [],
+                 posts_count: topicData?.posts_count || fetchedPosts.length,
++                highest_post_number: topicData?.highest_post_number ?? null,
+                 ...(topicData && "has_accepted_answer" in topicData ? { has_accepted_answer: topicData.has_accepted_answer } : {}),
+                 ...(topicData && "accepted_answers" in topicData ? { accepted_answers: Array.isArray(topicData.accepted_answers) ? topicData.accepted_answers.map((post) => projectPost(post, limit, { includeRaw: true })) : topicData.accepted_answers } : {}),
+                 posts: fetchedPosts,
+                 meta: {
+                     start_post: start,
+                     returned: fetchedPosts.length,
+-                    has_more: (topicData?.posts_count || 0) > (start + fetchedPosts.length - 1),
++                    has_more: hasMore,
++                    next_post_number: hasMore && lastPost ? lastPost.post_number + 1 : null,
+                 },
+             });
+         }
+@@ -75,4 +87,3 @@ export const readTopicTool = defineTool({
+         }
+     },
+ });
+-//# sourceMappingURL=read_topic.js.map
+\ No newline at end of file
+diff --git a/node_modules/@discourse/mcp/dist/tools/builtin/search.js b/node_modules/@discourse/mcp/dist/tools/builtin/search.js
+index a198c9e..4f9fd13 100644
+--- a/node_modules/@discourse/mcp/dist/tools/builtin/search.js
++++ b/node_modules/@discourse/mcp/dist/tools/builtin/search.js
+@@ -31,7 +31,7 @@ export const searchTool = defineTool({
+             }));
+             return jsonResponse(paginatedResponse("results", results, {
+                 total: results.length,
+-                has_more: topics.length > max_results,
++                has_more: topics.length > max_results || (data?.grouped_search_result?.more_full_page_results ?? data?.more_full_page_results) === true,
+             }));
+         }
+         catch (e) {
+@@ -39,4 +39,3 @@ export const searchTool = defineTool({
+         }
+     },
+ });
+-//# sourceMappingURL=search.js.map
+\ No newline at end of file
+diff --git a/node_modules/@discourse/mcp/dist/tools/builtin/search/search_posts.js b/node_modules/@discourse/mcp/dist/tools/builtin/search/search_posts.js
+index f9e3ed3..91401da 100644
+--- a/node_modules/@discourse/mcp/dist/tools/builtin/search/search_posts.js
++++ b/node_modules/@discourse/mcp/dist/tools/builtin/search/search_posts.js
+@@ -19,11 +19,13 @@ export const searchPostsTool = defineTool({
+             const q = new URLSearchParams({ expanded: "true", q: ctx.defaultSearchPrefix ? `${ctx.defaultSearchPrefix} ${query}` : query, page: String(page) });
+             const data = await withRateLimit(`discourse-api:${base}`, () => client.get(`/search.json?${q.toString()}`), 200);
+             const posts = (Array.isArray(data?.posts) ? data.posts : []).map((post) => projectPost(post, ctx.maxReadLength));
++            const grouped = data?.grouped_search_result;
++            const hasMore = (grouped?.more_full_page_results ?? data?.more_full_page_results) === true;
+             return jsonResponse({
+                 posts,
+                 topics: (Array.isArray(data?.topics) ? data.topics : []).map(projectTopic),
+                 ...projectSideLoads(data),
+-                meta: { page, returned: posts.length, has_more: data?.more_full_page_results === true, exhaustive: false, term: data?.term ?? query },
++                meta: { page, returned: posts.length, has_more: hasMore, next_page: hasMore && page < 10 ? page + 1 : null, truncated_reason: hasMore && page === 10 ? "page_limit" : null, exhaustive: false, term: grouped?.term ?? data?.term ?? query },
+             });
+         }
+         catch (error) {
+@@ -31,4 +33,3 @@ export const searchPostsTool = defineTool({
+         }
+     },
+ });
+-//# sourceMappingURL=search_posts.js.map
+\ No newline at end of file
+diff --git a/node_modules/@discourse/mcp/dist/tools/builtin/topics/get_post_replies.js b/node_modules/@discourse/mcp/dist/tools/builtin/topics/get_post_replies.js
+index 30bdc1c..a4dce52 100644
+--- a/node_modules/@discourse/mcp/dist/tools/builtin/topics/get_post_replies.js
++++ b/node_modules/@discourse/mcp/dist/tools/builtin/topics/get_post_replies.js
+@@ -7,6 +7,7 @@ const schema = z.object({
+     post_id: z.number().int().positive(),
+     mode: z.enum(["reply_ids", "direct_replies", "reply_history"]).optional().describe("reply_ids returns recursive descendant IDs; direct_replies returns up to 20 rich direct replies; reply_history returns ancestors"),
+     after_post_number: z.number().int().min(0).optional(),
++    include_raw: z.boolean().optional().describe("Fetch missing bodies for direct_replies/reply_history, bounded to 50 posts and four extra requests"),
+ });
+ export const getPostRepliesTool = defineTool({
+     name: "discourse_get_post_replies",
+@@ -16,8 +17,10 @@ export const getPostRepliesTool = defineTool({
+     availability: "always",
+     toolsets: ["activity"],
+     annotations: readAnnotations(),
+-    handler: async ({ post_id, mode = "reply_ids", after_post_number }, _extra, ctx) => {
++    handler: async ({ post_id, mode = "reply_ids", after_post_number, include_raw = false }, _extra, ctx) => {
+         try {
++            if (include_raw && mode === "reply_ids")
++                throw new Error("include_raw requires direct_replies or reply_history mode");
+             const { base, client } = ctx.siteState.ensureSelectedSite();
+             const path = mode === "reply_ids"
+                 ? `/posts/${post_id}/reply-ids.json`
+@@ -30,11 +33,34 @@ export const getPostRepliesTool = defineTool({
+                 return jsonResponse({ post_id, mode, replies, meta: { returned: replies.length, exhaustive: false, upstream_bounded: "recursive descendants up to depth 1000" } });
+             }
+             const rows = Array.isArray(data) ? data : [];
++            let requests = 1;
++            const bodies = new Map();
++            if (include_raw) {
++                const groups = new Map();
++                for (const post of rows.filter((post) => typeof post.raw !== "string").slice(0, 50)) {
++                    if (!Number.isInteger(post.id) || !Number.isInteger(post.topic_id))
++                        continue;
++                    const ids = groups.get(post.topic_id) ?? new Set();
++                    ids.add(post.id);
++                    groups.set(post.topic_id, ids);
++                }
++                for (const [topicId, ids] of groups) {
++                    if (requests >= 5)
++                        break;
++                    requests++;
++                    const response = await withRateLimit("discourse-api:" + base, () => client.get("/t/" + topicId + "/posts.json" + queryString({ post_ids: [...ids], include_raw: true })), 200);
++                    for (const post of response?.post_stream?.posts ?? []) {
++                        if (ids.has(post.id) && typeof post.raw === "string")
++                            bodies.set(post.id, post.raw);
++                    }
++                }
++            }
++            const hydrated = rows.map((post) => bodies.has(post.id) ? { ...post, raw: bodies.get(post.id) } : post);
+             return jsonResponse({
+                 post_id,
+                 mode,
+-                posts: rows.map((post) => projectPost(post, ctx.maxReadLength, { includeRaw: true })),
+-                meta: { returned: rows.length, has_more: null, page_was_full: mode === "direct_replies" ? rows.length === 20 : null, upstream_limit: mode === "direct_replies" ? 20 : "site max_reply_history" },
++                posts: hydrated.map((post) => projectPost(post, ctx.maxReadLength, { includeRaw: true })),
++                meta: { returned: rows.length, has_more: null, page_was_full: mode === "direct_replies" ? rows.length === 20 : null, upstream_limit: mode === "direct_replies" ? 20 : "site max_reply_history", actual_requests: requests, ...(include_raw ? { raw_complete: hydrated.every((post) => typeof post.raw === "string"), raw_read_limit: 50 } : {}) },
+             });
+         }
+         catch (error) {
+@@ -42,4 +68,3 @@ export const getPostRepliesTool = defineTool({
+         }
+     },
+ });
+-//# sourceMappingURL=get_post_replies.js.map
+\ No newline at end of file
+diff --git a/node_modules/@discourse/mcp/dist/tools/builtin/topics/read_topic_posts.js b/node_modules/@discourse/mcp/dist/tools/builtin/topics/read_topic_posts.js
+index c2d45cc..ff94661 100644
+--- a/node_modules/@discourse/mcp/dist/tools/builtin/topics/read_topic_posts.js
++++ b/node_modules/@discourse/mcp/dist/tools/builtin/topics/read_topic_posts.js
+@@ -22,7 +22,7 @@ const selectionSchema = z.discriminatedUnion("selection_mode", [
+ export const readTopicPostsTool = defineTool({
+     name: "discourse_read_topic_posts",
+     title: "Read Selected Topic Posts",
+-    description: "Read exact, earliest, latest, around-post, or username-filtered topic evidence. Selection is bounded to 50 posts and reports the visible stream size without claiming the entire topic was loaded.",
++    description: "Read exact, earliest, latest, around-post, or username-filtered posts using the visible topic stream. Returns at most 50 posts with at most five requests; reports request-budget truncation. Around-post includes the requested post when visible.",
+     schema,
+     availability: "always",
+     toolsets: ["topics"],
+@@ -35,56 +35,103 @@ export const readTopicPostsTool = defineTool({
+         try {
+             const { base, client } = ctx.siteState.ensureSelectedSite();
+             const selection = parsed.data;
+-            let streamIds = null;
+-            let selectedIds = null;
+-            let postsUrl;
++            const uniqueIds = (ids) => [...new Set(ids.filter((id) => Number.isInteger(id) && id > 0))];
+             const limit = "limit" in selection ? (selection.limit ?? 20) : 50;
++            const maxRequests = selection.selection_mode === "post_ids" ? 1 : 5;
++            let requests = 0;
++            const get = async (path) => {
++                requests++;
++                return withRateLimit("discourse-api:" + base, () => client.get(path), 200);
++            };
++            const loaded = new Map();
++            let streamIds = null;
++            let candidates;
++            let requestedPostFound;
+             if (selection.selection_mode === "post_ids") {
+-                selectedIds = selection.post_ids;
+-                postsUrl = `/t/${topic_id}/posts.json${queryString({ post_ids: selectedIds, include_raw: true })}`;
+-            }
+-            else if (selection.selection_mode === "around_post") {
+-                postsUrl = `/t/${topic_id}/posts.json${queryString({ post_number: selection.post_number, include_raw: true })}`;
++                candidates = uniqueIds(selection.post_ids);
+             }
+             else {
+-                const usernames = selection.selection_mode === "usernames" ? selection.usernames.join(",") : undefined;
+-                const idsData = await withRateLimit(`discourse-api:${base}`, () => client.get(`/t/${topic_id}/post_ids.json${queryString({ username_filters: usernames })}`), 200);
+-                streamIds = Array.isArray(idsData?.post_ids) ? idsData.post_ids.filter(Number.isInteger) : [];
+-                let candidates = streamIds ?? [];
+-                if (selection.replies_only)
+-                    candidates = candidates.slice(1);
+-                selectedIds = selection.selection_mode === "latest" ? candidates.slice(-limit) : candidates.slice(0, limit);
+-                if (selectedIds.length === 0) {
+-                    return jsonResponse({ topic_id, selection_mode: selection.selection_mode, posts: [], meta: { visible_stream_size: (streamIds ?? []).length, selected: 0, returned: 0, max_requests: 2, actual_requests: 1, exhaustive: false } });
++                const data = await get("/t/" + topic_id + ".json" + queryString({
++                    include_raw: true,
++                    track_visit: false,
++                    post_number: selection.selection_mode === "around_post" ? selection.post_number : undefined,
++                    username_filters: selection.selection_mode === "usernames" ? selection.usernames.join(",") : undefined,
++                }));
++                if (!Array.isArray(data?.post_stream?.stream))
++                    throw new Error("Topic response is missing the visible post stream");
++                streamIds = uniqueIds(data.post_stream.stream);
++                const initial = Array.isArray(data.post_stream.posts) ? data.post_stream.posts : [];
++                for (const post of initial) {
++                    if (typeof post.raw === "string")
++                        loaded.set(post.id, post);
++                }
++                candidates = streamIds;
++                if (selection.selection_mode === "latest")
++                    candidates = candidates.slice().reverse();
++                if (selection.selection_mode === "around_post") {
++                    const sorted = initial.slice().sort((a, b) => a.post_number - b.post_number);
++                    requestedPostFound = sorted.some((post) => post.post_number === selection.post_number);
++                    const anchor = sorted.find((post) => post.post_number >= selection.post_number) ?? sorted.at(-1);
++                    const index = anchor ? streamIds.indexOf(anchor.id) : -1;
++                    if (index < 0 && streamIds.length > 0)
++                        throw new Error("Cannot locate requested post in the visible topic stream");
++                    const start = Math.max(0, Math.min(index - Math.floor(limit / 2), streamIds.length - limit));
++                    candidates = streamIds.slice(start, start + limit);
+                 }
+-                postsUrl = `/t/${topic_id}/posts.json${queryString({ post_ids: selectedIds, include_raw: true })}`;
+             }
+-            const data = await withRateLimit(`discourse-api:${base}`, () => client.get(postsUrl), 200);
+-            let posts = Array.isArray(data?.post_stream?.posts) ? data.post_stream.posts : [];
+-            if (selection.selection_mode === "around_post")
+-                posts = posts.slice(0, limit);
+-            if (selectedIds) {
+-                const order = new Map(selectedIds.map((id, index) => [id, index]));
+-                posts = posts.filter((post) => order.has(post.id)).sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
++            const authors = selection.selection_mode === "usernames"
++                ? new Set(selection.usernames.map((name) => name.toLowerCase()))
++                : null;
++            const posts = [];
++            let examined = 0;
++            while (examined < candidates.length && posts.length < limit) {
++                const id = candidates[examined];
++                if (!loaded.has(id)) {
++                    if (requests >= maxRequests)
++                        break;
++                    const batch = candidates.slice(examined, examined + Math.min(50, limit - posts.length + 1));
++                    const data = await get("/t/" + topic_id + "/posts.json" + queryString({ post_ids: batch, include_raw: true }));
++                    if (!Array.isArray(data?.post_stream?.posts))
++                        throw new Error("Posts response is missing posts");
++                    // Missing/inaccessible IDs are consumed once, without blind retries.
++                    const wanted = new Set(batch);
++                    for (const batchId of batch)
++                        loaded.set(batchId, null);
++                    for (const post of data.post_stream.posts) {
++                        if (wanted.has(post.id))
++                            loaded.set(post.id, post);
++                    }
++                }
++                const post = loaded.get(id);
++                examined++;
++                if (!post || (selection.replies_only && post.post_number <= 1))
++                    continue;
++                if (authors && !authors.has(String(post.username).toLowerCase()))
++                    continue;
++                posts.push(post);
+             }
+-            else
+-                posts = posts.slice().sort((a, b) => (a.post_number ?? 0) - (b.post_number ?? 0));
++            if (selection.selection_mode === "latest")
++                posts.sort((a, b) => a.post_number - b.post_number);
+             return jsonResponse({
+                 topic_id,
+                 selection_mode: selection.selection_mode,
+                 posts: posts.map((post) => projectPost(post, ctx.maxReadLength, { includeRaw: true })),
+                 meta: {
+                     visible_stream_size: streamIds?.length ?? null,
+-                    selected: selectedIds?.length ?? posts.length,
++                    candidate_count: candidates.length,
++                    selected: Math.min(candidates.length, limit),
++                    examined,
+                     returned: posts.length,
+-                    max_requests: selection.selection_mode === "post_ids" || selection.selection_mode === "around_post" ? 1 : 2,
++                    max_requests: maxRequests,
++                    actual_requests: requests,
++                    truncated_reason: examined < candidates.length && posts.length < limit ? "request_limit" : null,
++                    ...(requestedPostFound === undefined ? {} : { requested_post_found: requestedPostFound }),
+                     exhaustive: false,
+                 },
+             });
+         }
+         catch (error) {
+-            return upstreamError(`Failed to read posts for topic ${topic_id}`, error);
++            return upstreamError("Failed to read posts for topic " + topic_id, error);
+         }
+     },
+ });
+-//# sourceMappingURL=read_topic_posts.js.map
+\ No newline at end of file
