@@ -1,0 +1,21 @@
+{
+  "name": "shuiyuan-bot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "auth": "node scripts/generate-user-api-key.mjs",
+    "mcp": "node node_modules/@discourse/mcp/dist/index.js --profile discourse-profile.json --tools_mode discourse_api_only",
+    "mcp:readonly": "node node_modules/@discourse/mcp/dist/index.js --profile discourse-profile.json --tools_mode discourse_api_only --allow_writes false --read_only true",
+    "check:mcp": "node scripts/check-mcp-readonly.mjs"
+  },
+  "dependencies": {
+    "@discourse/mcp": "0.3.1"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0"
+  }
+}
