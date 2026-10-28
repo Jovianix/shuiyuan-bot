@@ -195,6 +195,41 @@ index 6d6ad50..f113194 100644
  });
 -//# sourceMappingURL=filter_topics.js.map
 \ No newline at end of file
+diff --git a/node_modules/@discourse/mcp/dist/tools/builtin/get_user.js b/node_modules/@discourse/mcp/dist/tools/builtin/get_user.js
+index 6cc795d..6993cbc 100644
+--- a/node_modules/@discourse/mcp/dist/tools/builtin/get_user.js
++++ b/node_modules/@discourse/mcp/dist/tools/builtin/get_user.js
+@@ -4,7 +4,7 @@ import { jsonResponse, jsonError } from "../../util/json_response.js";
+ import { requireAdminAccess } from "../../util/access.js";
+ import { readAnnotations } from "./common/helpers.js";
+ const schema = z.object({
+-    username: z.string().min(1),
++    username: z.string().min(1).optional().describe("Omit to read the authenticated account identity"),
+ });
+ export const getUserTool = defineTool({
+     name: "discourse_get_user",
+@@ -17,8 +17,10 @@ export const getUserTool = defineTool({
+     handler: async ({ username }, _extra, ctx, opts) => {
+         try {
+             const { client } = ctx.siteState.ensureSelectedSite();
+-            const data = (await client.get(`/u/${encodeURIComponent(username)}.json`));
+-            const user = data?.user || data;
++            const data = (await client.get(username ? `/u/${encodeURIComponent(username)}.json` : "/session/current.json"));
++            const user = username ? (data?.user || data) : data?.current_user;
++            if (!user?.id || !user?.username)
++                throw new Error("User identity missing from response");
+             const response = {
+                 id: user?.id,
+                 username: user?.username || username,
+@@ -31,7 +33,7 @@ export const getUserTool = defineTool({
+                 email: undefined
+             };
+             const hasAdminAccess = !requireAdminAccess(ctx.siteState);
+-            if (hasAdminAccess && opts.showEmails) {
++            if (username && hasAdminAccess && opts.showEmails) {
+                 const emailData = (await client.get(`/u/${encodeURIComponent(username)}/emails.json`));
+                 response.email = emailData?.email || null;
+             }
 diff --git a/node_modules/@discourse/mcp/dist/tools/builtin/read_topic.js b/node_modules/@discourse/mcp/dist/tools/builtin/read_topic.js
 index 556522a..37d880b 100644
 --- a/node_modules/@discourse/mcp/dist/tools/builtin/read_topic.js
@@ -362,7 +397,7 @@ index 30bdc1c..a4dce52 100644
 -//# sourceMappingURL=get_post_replies.js.map
 \ No newline at end of file
 diff --git a/node_modules/@discourse/mcp/dist/tools/builtin/topics/read_topic_posts.js b/node_modules/@discourse/mcp/dist/tools/builtin/topics/read_topic_posts.js
-index c2d45cc..ff94661 100644
+index c2d45cc..be384f2 100644
 --- a/node_modules/@discourse/mcp/dist/tools/builtin/topics/read_topic_posts.js
 +++ b/node_modules/@discourse/mcp/dist/tools/builtin/topics/read_topic_posts.js
 @@ -22,7 +22,7 @@ const selectionSchema = z.discriminatedUnion("selection_mode", [
@@ -374,7 +409,7 @@ index c2d45cc..ff94661 100644
      schema,
      availability: "always",
      toolsets: ["topics"],
-@@ -35,56 +35,103 @@ export const readTopicPostsTool = defineTool({
+@@ -35,56 +35,106 @@ export const readTopicPostsTool = defineTool({
          try {
              const { base, client } = ctx.siteState.ensureSelectedSite();
              const selection = parsed.data;
@@ -393,6 +428,7 @@ index c2d45cc..ff94661 100644
 +            let streamIds = null;
 +            let candidates;
 +            let requestedPostFound;
++            let archetype = null;
              if (selection.selection_mode === "post_ids") {
 -                selectedIds = selection.post_ids;
 -                postsUrl = `/t/${topic_id}/posts.json${queryString({ post_ids: selectedIds, include_raw: true })}`;
@@ -419,6 +455,7 @@ index c2d45cc..ff94661 100644
 +                }));
 +                if (!Array.isArray(data?.post_stream?.stream))
 +                    throw new Error("Topic response is missing the visible post stream");
++                archetype = data.archetype ?? null;
 +                streamIds = uniqueIds(data.post_stream.stream);
 +                const initial = Array.isArray(data.post_stream.posts) ? data.post_stream.posts : [];
 +                for (const post of initial) {
@@ -484,6 +521,7 @@ index c2d45cc..ff94661 100644
 +                posts.sort((a, b) => a.post_number - b.post_number);
              return jsonResponse({
                  topic_id,
++                archetype,
                  selection_mode: selection.selection_mode,
                  posts: posts.map((post) => projectPost(post, ctx.maxReadLength, { includeRaw: true })),
                  meta: {

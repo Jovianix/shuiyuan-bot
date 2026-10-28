@@ -37,7 +37,8 @@ HTTP 请求串行执行，前一个响应读取完成后至少等待 5 秒，
 | --- | --- |
 | `discourse_search`、`discourse_search_posts` | 读取 `grouped_search_result` 内的分页标记；帖子搜索提供 `next_page`，达到既有 10 页上限时说明截断原因 |
 | `discourse_read_topic` | 根据可见帖子 ID 流判断后续内容；增加 `highest_post_number`、`meta.next_post_number`；信息不足时 `has_more` 为 `null` |
-| `discourse_read_topic_posts` | 使用主题响应中的 ID 流；去重、校验作者，按实际楼层过滤首楼；附近读取包含可见的目标楼层 |
+| `discourse_read_topic_posts` | 使用主题响应中的 ID 流；去重、校验作者，按实际楼层过滤首楼；附近读取包含可见的目标楼层；保留主题 `archetype` |
+| `discourse_get_user` | 省略用户名时只读查询当前凭据对应的账号身份，返回原有公开字段投影 |
 | `discourse_filter_topics` | 提供 `meta.next_cursor`，保留上游页面尚未返回的条目 |
 | `discourse_get_post_replies` | 可选 `include_raw: true`，批量补读直接回复或上级回复的正文 |
 | `discourse_create_post` | 支持可选的 `reply_to_post_number`，单位是主题内楼层号 |

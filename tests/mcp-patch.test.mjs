@@ -62,6 +62,23 @@ test('latest selects the actual tail, deduplicates IDs and restores chronologica
   assert.ok(setup.calls.every(path => !path.includes('/post_ids.json')));
 });
 
+test('selected topic reads preserve archetype so consumers can exclude private messages', async () => {
+  const setup = fixture(() => ({archetype: 'private_message', post_stream: {stream: [1001], posts: [post(1)]}}));
+  const result = await invoke('discourse_read_topic_posts', {topic_id: 77, selection_mode: 'around_post', post_number: 1, limit: 1}, setup);
+  assert.equal(result.archetype, 'private_message');
+});
+
+test('get_user without username verifies the authenticated identity without exposing credentials', async () => {
+  const setup = fixture(url => {
+    assert.equal(url.pathname, '/session/current.json');
+    return {current_user: {id: 10, username: 'owner', auth_token: 'must-not-leak'}};
+  });
+  const result = await invoke('discourse_get_user', {}, setup);
+  assert.equal(result.id, 10);
+  assert.equal(result.username, 'owner');
+  assert.equal(result.auth_token, undefined);
+});
+
 test('author selection excludes an injected OP and fills the requested count', async () => {
   const posts = [post(1, 'bob'), post(4), post(6), post(8)];
   const setup = selectedFixture(posts, { initial: [posts[0]], ids: [1001, 1001, 1004, 1006, 1008] });
