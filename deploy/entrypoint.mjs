@@ -5,7 +5,7 @@ import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { request } from 'node:http';
 import { loadConfig } from '../plugins/shuiyuan-pet/dist/config.js';
-import { currentCard, hash, planSeed } from './soul-seed.mjs';
+import { currentCard, hash, isEmptyPatch, planSeed } from './soul-seed.mjs';
 
 process.umask(0o077);
 const petConfig = loadConfig(process.env.PET_CONFIG ?? '/app/config/pet.json');
@@ -46,7 +46,8 @@ const patchText = await readFile(patchFile, 'utf8').catch(error => {
 });
 const previous = await readFile(seedRecord, 'utf8').then(JSON.parse).catch(() => undefined);
 const plan = planSeed({soul, card: patchText === null ? undefined : currentCard(patchText),
-  patch: patchText !== null, recorded: previous?.soul, force});
+  patch: patchText !== null, empty: patchText !== null && isEmptyPatch(patchText),
+  recorded: previous?.soul, force});
 if (plan.action === 'write') {
   await writeFile(patchFile, soulPatch(soul));
   await recordSoul(soul);

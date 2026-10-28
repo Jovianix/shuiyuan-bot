@@ -25,17 +25,33 @@ export function currentCard(text) {
 }
 
 /**
+ * True when the patch file holds no entries: DSH's profile template is a comment header
+ * followed by `[]`. Nothing in that file can be a user's card, so seeding it is safe.
+ */
+export function isEmptyPatch(text) {
+  const body = text.split('\n').filter(line => !line.trimStart().startsWith('#')).join('\n').trim();
+  if (!body) return true;
+  try {
+    const parsed = JSON.parse(body);
+    return Array.isArray(parsed) && parsed.length === 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * How the profile's card relates to the image's `config/soul.md`, given what this entrypoint
  * last seeded (`recorded`, a hash) and what the profile holds now (`card`, undefined when
- * `cordis.patch.yml` is absent or not the JSON this entrypoint writes; `patch` says which).
+ * `cordis.patch.yml` is absent, empty, or not the JSON this entrypoint writes; `patch` says
+ * whether a file exists at all, `empty` whether it holds no entries).
  *
  * The card is user-managed once initialized, so it is only rewritten while it still holds
  * exactly what was seeded. Anything else is left alone unless `force` is set, because
  * overwriting it would silently discard a card edited in DSH Web.
  */
-export function planSeed({soul, recorded, card, patch = card !== undefined, force}) {
-  // A volume with no profile patch has nothing to protect.
-  if (!patch) return {action: 'write'};
+export function planSeed({soul, recorded, card, patch = card !== undefined, empty = false, force}) {
+  // No patch file, or one with no entries: there is no card to protect.
+  if (!patch || empty) return {action: 'write'};
   // The file exists but cannot be read as ours, so someone else owns it.
   if (card === undefined) return force ? {action: 'write'} : {action: 'conflict', reason: 'unreadable'};
   if (card === soul) return {action: recorded === hash(soul) ? 'none' : 'record'};
