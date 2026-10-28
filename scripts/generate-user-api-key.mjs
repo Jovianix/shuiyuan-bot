@@ -1,13 +1,15 @@
 #!/usr/bin/env node
 // Node.js 24+. Authorize once with the exported _t cookie, then reuse the saved key.
 import { constants, generateKeyPairSync, privateDecrypt, randomBytes, randomUUID } from 'node:crypto';
-import { access, chmod, open, readFile, unlink } from 'node:fs/promises';
+import { access, chmod, mkdir, open, readFile, unlink } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 
 const site = 'https://shuiyuan.sjtu.edu.cn';
 const root = new URL('../', import.meta.url);
-const profilePath = new URL('discourse-profile.json', root);
-const pendingPath = new URL('.user-api-key-pending.json', root);
+// Kept with the other runtime secrets; the directory is excluded from git and the image build.
+const secretsDir = new URL('secrets/', root);
+const profilePath = new URL('discourse-profile.json', secretsDir);
+const pendingPath = new URL('.user-api-key-pending.json', secretsDir);
 
 async function exists(path) {
   try {
@@ -88,6 +90,7 @@ async function verifyKey(profile) {
 }
 
 async function main() {
+  await mkdir(secretsDir, { recursive: true, mode: 0o700 });
   if (await exists(profilePath)) {
     const profile = JSON.parse(await readFile(profilePath, 'utf8'));
     await chmod(profilePath, 0o600);

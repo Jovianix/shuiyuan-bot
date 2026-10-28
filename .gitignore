@@ -1,6 +1,11 @@
-.env
-discourse-profile.json
-.user-api-key-pending.json
+# Local credentials, config and data. Anchored to the root so deploy/runtime/ stays tracked.
+/.env
+/secrets/
+/runtime/
+/config/pet.json
+# Design notes stay local.
+/docs/
+
 # Created by https://www.toptal.com/developers/gitignore/api/node,linux,macos
 # Edit at https://www.toptal.com/developers/gitignore?templates=node,linux,macos
 

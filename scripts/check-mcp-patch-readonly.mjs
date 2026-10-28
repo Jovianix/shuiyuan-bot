@@ -6,14 +6,14 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { builtinTools } from '../node_modules/@discourse/mcp/dist/tools/builtin/catalog.js';
 
 const root = new URL('../', import.meta.url);
-const profile = JSON.parse(await readFile(new URL('discourse-profile.json', root), 'utf8'));
+const profile = JSON.parse(await readFile(new URL('secrets/discourse-profile.json', root), 'utf8'));
 assert.equal(profile.site, 'https://shuiyuan.sjtu.edu.cn');
 const transport = new StdioClientTransport({
   command: process.execPath,
   args: [
     '--import', fileURLToPath(new URL('readonly-http.mjs', import.meta.url)),
     fileURLToPath(new URL('node_modules/@discourse/mcp/dist/index.js', root)),
-    '--profile', fileURLToPath(new URL('discourse-profile.json', root)),
+    '--profile', fileURLToPath(new URL('secrets/discourse-profile.json', root)),
     '--tools_mode', 'discourse_api_only',
     '--allow_writes', 'false', '--read_only', 'true',
     '--toolsets', 'topics,search,activity', '--timeout_ms', '60000',

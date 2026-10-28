@@ -16,7 +16,7 @@ npm test
 重复 ID、作者筛选、分页连续性、游标失效、回复正文补读和写入参数。
 创建主题和回复只使用模拟 HTTP 请求测试。
 
-已有本地 `discourse-profile.json` 时，可运行：
+已有本地 `secrets/discourse-profile.json` 时，可运行：
 
 ```sh
 npm run check:mcp:patch
