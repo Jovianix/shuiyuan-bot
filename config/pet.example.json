@@ -1,0 +1,7 @@
+{
+  "site": "https://shuiyuan.sjtu.edu.cn",
+  "owner": "CHANGE_ME", "ownerId": 0,
+  "petId": "fish", "petName": "大肥鱼",
+  "mode": "draft", "replyTopics": [], "scan": false,
+  "provider": "deepseek-official", "model": "deepseek-flash"
+}

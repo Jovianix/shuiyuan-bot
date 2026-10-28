@@ -1,0 +1,8 @@
+node_modules
+.git
+.env*
+secrets
+runtime
+config/pet.json
+*.log
+plugins/shuiyuan-pet/dist
