@@ -24,9 +24,16 @@ export interface Forum {
   /** The owner's own topics and replies plus posts mentioning the owner, newest first. */
   actions(limit: number): Promise<Activity[]>;
   recentOwnPosts(topic: number): Promise<Post[]>;
+  /** Exact floors by post ID: one request for up to 50 ids. */
+  readByIds(topic: number, ids: number[]): Promise<Post[]>;
+  /** Ancestor chain or direct replies of one post, as the forum reports them. */
+  thread(postId: number, direction: ThreadDirection): Promise<Post[]>;
+  /** Post-level search hits. Callers filter them to the topics they may read. */
+  searchPosts(query: string): Promise<Post[]>;
   send(topic: number, parent: number, raw: string): Promise<CreatedPost>;
   close(): Promise<void>;
 }
+export type ThreadDirection = 'ancestors' | 'replies';
 export interface ContextPack {
   source: Post; related: Post[]; missing: string[]; truncated: number[];
   sourceHash: string;
@@ -34,7 +41,7 @@ export interface ContextPack {
 /** `notice` marks the fixed failure notice that replaces an answer that could not be produced or posted. */
 export interface Answer { text: string; sessionId: string; turn: number; soulHash: string; notice?: boolean; }
 export interface Model {
-  generate(input: ContextPack, sessionId: string, signal: AbortSignal): Promise<Answer>;
+  generate(input: ContextPack, sessionId: string, signal: AbortSignal, forum: Forum): Promise<Answer>;
   recover(sessionId: string): Promise<Answer | undefined>;
 }
 export type State = 'queued' | 'generating' | 'draft_ready' | 'sending' | 'sent' | 'delivery_unknown' | 'failed' | 'skipped';

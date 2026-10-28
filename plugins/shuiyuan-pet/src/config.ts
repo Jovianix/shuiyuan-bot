@@ -8,6 +8,7 @@ export interface Config {
   dataDir: string; profilePath: string; mcpScript: string; httpGapMs: number;
   provider: string; model: string; timeoutMs: number; maxTokens: number;
   relatedLimit: number; contextChars: number; maxAttempts: number;
+  readCalls: number; readChars: number; readTotal: number; readSpan: number;
   controlSocket: string; workspace: string;
 }
 export function loadConfig(path: string): Config {
@@ -24,6 +25,9 @@ export function loadConfig(path: string): Config {
     mcpScript: '/app/node_modules/@discourse/mcp/dist/index.js', httpGapMs: 2000,
     provider: 'deepseek-official', model: 'deepseek-flash', timeoutMs: 180_000,
     maxTokens: 2048, relatedLimit: 4, contextChars: 12_000, maxAttempts: 3,
+    // Model-initiated reads share the MCP child's single serial queue with scanning and
+    // reconciliation, so one task may not spend the key's minute on its own curiosity.
+    readCalls: 4, readChars: 6000, readTotal: 20_000, readSpan: 11,
     controlSocket: '/data/pet/control.sock', workspace: '/data/workspace', ...data,
   };
   const site = new URL(config.site);

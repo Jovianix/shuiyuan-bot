@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import type { Config } from './config.js';
-import type { Activity, CreatedPost, Forum, Post, PostHead } from './types.js';
+import type { Activity, CreatedPost, Forum, Post, PostHead, ThreadDirection } from './types.js';
 import { ForumError, PermanentError } from './types.js';
 
 export class Discourse implements Forum {
@@ -94,6 +94,44 @@ export class Discourse implements Forum {
       topic_id: topic, selection_mode: 'latest', limit: 50,
     });
     return this.complete(data.posts.filter(p => p.user_id === this.config.ownerId), data.archetype);
+  }
+  /** Exact floors by post ID: one request for up to 50 ids, which is what a model asks for. */
+  async readByIds(topic: number, ids: number[]): Promise<Post[]> {
+    const data = await this.call<{posts: Post[]; archetype: string | null}>('discourse_read_topic_posts', {
+      topic_id: topic, selection_mode: 'post_ids', post_ids: ids,
+    });
+    // post_ids reports archetype=null (it never reads the topic head), so only a
+    // known-private topic is refused here; the pre-send read still checks the topic.
+    if (data.archetype === 'private_message') throw new PermanentError('Only regular forum topics are supported');
+    return this.complete(data.posts.filter(p => p.topic_id === topic), data.archetype);
+  }
+  /** `reply_history` walks up the ancestors; `direct_replies` returns the floors answering this one. */
+  async thread(postId: number, direction: ThreadDirection): Promise<Post[]> {
+    const data = await this.call<{posts: Post[]}>('discourse_get_post_replies', {
+      post_id: postId,
+      mode: direction === 'ancestors' ? 'reply_history' : 'direct_replies',
+      include_raw: true,
+    });
+    if (!Array.isArray(data.posts)) return [];
+    // Neither reply endpoint reports the topic archetype; callers filter by topic.
+    return this.complete(data.posts, null);
+  }
+  async searchPosts(query: string): Promise<Post[]> {
+    const data = await this.call<{posts: (Partial<Post> & {excerpt?: string | null; blurb?: string | null})[]}>(
+      'discourse_search_posts', {query, page: 1});
+    if (!Array.isArray(data.posts)) return [];
+    // Search returns a highlighted excerpt, not the raw body. Hits are previews identified by
+    // their post id; the model reads a chosen floor through read_posts. A hit without an id
+    // could not be followed up, so it is dropped.
+    return data.posts
+      .filter(p => Number.isSafeInteger(p.id) && Number.isSafeInteger(p.topic_id))
+      .map(p => ({
+        id: p.id!, topic_id: p.topic_id!, post_number: Number.isSafeInteger(p.post_number) ? p.post_number! : 0,
+        user_id: Number.isSafeInteger(p.user_id) ? p.user_id! : 0,
+        username: typeof p.username === 'string' ? p.username : '',
+        created_at: typeof p.created_at === 'string' ? p.created_at : '',
+        raw: p.raw ?? p.excerpt ?? p.blurb ?? '',
+      }));
   }
   /** One create request. The server's own response is the verification; no read-back. */
   async send(topic: number, parent: number, raw: string): Promise<CreatedPost> {

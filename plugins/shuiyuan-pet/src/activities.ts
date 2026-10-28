@@ -110,7 +110,7 @@ export class Activities {
       const recovered = task.session_id ? await this.model.recover(task.session_id) : undefined;
       const sessionId = recovered?.sessionId ?? randomUUID();
       this.store.update(task.id, {session_id: sessionId});
-      const raw = recovered ?? await this.model.generate(context, sessionId, AbortSignal.any([signal, AbortSignal.timeout(this.config.timeoutMs)]));
+      const raw = recovered ?? await this.model.generate(context, sessionId, AbortSignal.any([signal, AbortSignal.timeout(this.config.timeoutMs)]), this.forum);
       const answer = this.forumAnswer(raw);
       // discourse_create_post rejects longer bodies before any request, which would read as an unknown send.
       if (!answer.text.trim() || answer.text.length > 30_000) throw new Error('Invalid final response');

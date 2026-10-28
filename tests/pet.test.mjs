@@ -9,6 +9,9 @@ import { Store } from '../plugins/shuiyuan-pet/dist/store.js';
 import { Activities } from '../plugins/shuiyuan-pet/dist/activities.js';
 import { Discovery } from '../plugins/shuiyuan-pet/dist/discovery.js';
 import { DshModel, extractAnswer } from '../plugins/shuiyuan-pet/dist/dsh.js';
+import { renderPayload, readableTopics } from '../plugins/shuiyuan-pet/dist/payload.js';
+import { Reader } from '../plugins/shuiyuan-pet/dist/tools.js';
+import { renderPost, stripSignature } from '../plugins/shuiyuan-pet/dist/format.js';
 import { ForumError, PermanentError } from '../plugins/shuiyuan-pet/dist/types.js';
 
 const config = {
@@ -40,6 +43,18 @@ function fixture(t, options={}) {
   const cfg={...config,...options.config};
   const activities=new Activities(store,forum,model,cfg);
   return {store,forum,model,activities,source,cfg,dir,get sends(){return sends;},get generations(){return generations;},get reads(){return reads;}};
+}
+/** A forum whose reader tools answer from fixed floors; `reads` counts tool-driven requests. */
+function forumStub(post=p => p){
+  const floors=new Map([[1,post(1)],[2,post(2)]]);
+  const reads=[];const forum={reads,
+    readAround:async(topic,floor,limit)=>{reads.push(['readAround',topic,floor,limit]);return [...floors.values()];},
+    readByIds:async(topic,ids)=>{reads.push(['readByIds',topic,ids]);return [...floors.values()];},
+    thread:async(id,direction)=>{reads.push(['thread',id,direction]);return [post(2)];},
+    searchPosts:async(query)=>{reads.push(['searchPosts',query]);return [post(2)];},
+    locate:async()=>{throw new Error('not used');},actions:async()=>[],recentOwnPosts:async()=>[],
+    send:async()=>{throw new Error('not used');},close:async()=>{}};
+  return forum;
 }
 const signal=()=>new AbortController().signal;
 
@@ -286,16 +301,89 @@ test('final extraction requires matching completed turn and excludes reasoning',
   const injected=events();injected.splice(3,0,{type:'user/message',data:{id:'runtime',source:{kind:'runtime-context'}}});
   assert.equal(extractAnswer(injected,'session','input').text,'你好呀');
 });
-test('DSH adapter restricts tools before prompt, flushes and disposes; reads recovery without resume',async()=>{
+test('DSH adapter registers only the forum readers, then prompts, flushes and disposes',async()=>{
   const calls=[];let log=events();
   const ctx={agents:{create:async options=>{
-    options.setup({tools:{restrict:v=>calls.push(['restrict',v]),guard:fn=>calls.push(['guard',fn()])}});
+    options.setup({tools:{restrict:v=>calls.push(['restrict',v]),register:d=>calls.push(['register',d.name]),
+      guard:fn=>calls.push(['guard',fn({name:'bash'}),fn({name:'read_around'})])}});
     assert.equal(options.meta.agentPreset,'pet');
     return {agent:{session:{id:options.sessionId,snapshotEvents:()=>log},
-      followup:message=>{log[2].data.id=message.id;calls.push(['prompt']);},whenIdle:async()=>{},cancel:()=>{}},dispose:async()=>calls.push(['dispose'])};
+      followup:message=>{log[2].data.id=message.id;calls.push(['prompt',message.content[0].text]);},whenIdle:async()=>{},cancel:()=>{}},dispose:async()=>calls.push(['dispose'])};
   }},sessions:{flush:async()=>{calls.push(['flush']);return true;}},
     sessionPersistence:{stat:async()=>({}),open:async(_id,access)=>{assert.equal(access,'read');return {read:async()=>({events:log}),close:async()=>calls.push(['close-read'])};}}};
-  const model=new DshModel(ctx,config);const result=await model.generate({source:post(),related:[],missing:[],truncated:[]},'session',signal());
-  assert.equal(result.text,'你好呀');assert.deepEqual(calls.map(c=>c[0]),['restrict','guard','prompt','flush','dispose']);
-  assert.deepEqual(calls[0][1],{allow:[]});assert.equal((await model.recover('session')).text,'你好呀');
+  const model=new DshModel(ctx,config);const result=await model.generate({source:post(),related:[],missing:[],truncated:[],sourceHash:'h'},'session',signal(),forumStub());
+  assert.equal(result.text,'你好呀');
+  // Every reader is registered before the restriction that keeps harness tools out.
+  assert.deepEqual(calls.filter(c=>c[0]==='register').map(c=>c[1]),['read_around','read_posts','read_thread','search']);
+  assert.equal(calls.findIndex(c=>c[0]==='register')<calls.findIndex(c=>c[0]==='restrict'),true);
+  assert.deepEqual(calls.find(c=>c[0]==='restrict')[1],{allow:[]});
+  // The guard denies anything that is not a forum reader, and permits these.
+  const [,denied,allowed]=calls.find(c=>c[0]==='guard');
+  assert.match(denied,/run no tools other than/);assert.equal(allowed,undefined);
+  // The prompt is the compact text payload, not raw JSON of every post field.
+  const prompt=calls.find(c=>c[0]==='prompt')[1];
+  assert.match(prompt,/\[调用帖\]/);assert.match(prompt,/#1 caller\(u20\)/);
+  assert.doesNotMatch(prompt,/sourceHash|post_type|accepted_answer/);
+  assert.equal((await model.recover('session')).text,'你好呀');
+});
+
+test('payload is compact text with an addressable header, not a JSON dump',()=>{
+  const source=post(8,{reply_to_post_number:2,raw:'[quote="a, post:2]x[/quote]\n正文'});
+  const text=renderPayload({source,related:[post(2,{raw:'父帖'})],missing:['88/4: unavailable'],truncated:[7],sourceHash:'abc'},config);
+  assert.match(text,/^这是一次论坛调用。/);
+  assert.match(text,/主题 77 的第 8 楼/);
+  // Header carries the floor, a citable author id, a timestamp and the parent floor.
+  assert.match(text,/#8 caller\(u20\) \d{4}-\d\d-\d\d \d\d:\d\dZ →#2\n/);
+  // A quote inside the source stays: it is what the caller actually wrote.
+  assert.match(text,/\n\[quote="a, post:2\]x\[\/quote\]\n正文/);
+  assert.match(text,/#2 caller\(u20\)/);
+  assert.match(text,/88\/4: unavailable/);
+  assert.match(text,/#7/);
+  for(const noise of ['sourceHash','post_type','accepted_answer','archetype','"raw"','topic_slug'])
+    assert.equal(text.includes(noise),false,noise);
+  // The same two floors cost less as text than the 26-field JSON did.
+  assert.ok(text.length < JSON.stringify({source,related:[post(2)]}).length);
+});
+test('signature blocks are stripped from what the model reads but not from the source hash',()=>{
+  const raw='正文\n\n<div data-signature>\n---\n落款\n</div>';
+  assert.equal(stripSignature(raw),'正文');
+  assert.match(renderPost(post(1,{raw})),/^#1 .*\n正文$/);
+});
+test('readable topics are the source topic and every topic already in context',()=>{
+  assert.deepEqual([...readableTopics({source:post(1,{topic_id:77}),related:[post(2,{topic_id:88})],missing:[],truncated:[],sourceHash:'h'})].sort(),[77,88]);
+});
+test('reader tools refuse other topics, charge the call budget, and cap the characters',async()=>{
+  const forum=forumStub();
+  const reader=new Reader(forum,{...config,readCalls:2,readChars:50,readTotal:60,readSpan:11},
+    {source:post(1,{topic_id:77}),related:[],missing:[],truncated:[],sourceHash:'h'});
+  const tools=Object.fromEntries(reader.definitions().map(tool=>[tool.name,tool]));
+  assert.deepEqual(Object.keys(tools).sort(),['read_around','read_posts','read_thread','search']);
+  // A topic outside the task is refused before any request is made.
+  await assert.rejects(tools.read_around.execute({topic_id:99,post_number:1},{}),/只能读取与本次调用相关的主题/);
+  assert.equal(forum.reads.length,0);
+  const first=await tools.read_around.execute({topic_id:77,post_number:1,span:3},{});
+  assert.deepEqual(forum.reads[0],['readAround',77,1,3]);
+  assert.ok(first.text.length<=50||first.text.includes('截断'));
+  await tools.read_thread.execute({post_id:2,direction:'ancestors'},{});
+  // The third call in one turn is refused rather than quietly costing another request.
+  await assert.rejects(tools.search.execute({query:'天空'},{}),/达到上限/);
+  assert.equal(forum.reads.length,2);
+});
+test('reader tools reject malformed arguments instead of trusting the model',async()=>{
+  const reader=new Reader(forumStub(),config,{source:post(1),related:[],missing:[],truncated:[],sourceHash:'h'});
+  const tools=Object.fromEntries(reader.definitions().map(tool=>[tool.name,tool]));
+  await assert.rejects(tools.read_around.execute({topic_id:77,post_number:0},{}),/正整数/);
+  await assert.rejects(tools.read_posts.execute({topic_id:77,post_ids:[]},{}),/至少一个/);
+  await assert.rejects(tools.read_thread.execute({post_id:2,direction:'sideways'},{}),/ancestors/);
+  await assert.rejects(tools.search.execute({query:'   '},{}),/不能为空/);
+});
+test('output.render reads the canonical value from its second argument',async()=>{
+  // The registry calls render(args, value); a one-argument renderer silently receives the
+  // arguments object and returns undefined text, which fails as INVALID_TOOL_OUTPUT at runtime.
+  const reader=new Reader(forumStub(),config,{source:post(1),related:[],missing:[],truncated:[],sourceHash:'h'});
+  for(const tool of reader.definitions()){
+    const args={topic_id:77,post_number:1,post_ids:[1],post_id:1,direction:'ancestors',query:'x'};
+    const blocks=tool.output.render(args,{text:'正文'});
+    assert.deepEqual(blocks,[{type:'text',text:'正文'}],tool.name);
+  }
 });
