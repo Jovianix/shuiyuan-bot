@@ -5,6 +5,7 @@ import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { request } from 'node:http';
 import { loadConfig } from '../plugins/shuiyuan-pet/dist/config.js';
+import { currentCard, hash, planSeed } from './soul-seed.mjs';
 
 process.umask(0o077);
 const petConfig = loadConfig(process.env.PET_CONFIG ?? '/app/config/pet.json');
@@ -31,13 +32,34 @@ if (await exists(marker)) {
 await writeFile(marker, JSON.stringify(manifest));
 const soul = await readFile('/app/config/soul.md', 'utf8');
 const seedMarker = join(home, 'pet-profile-initialized');
-if (!await exists(seedMarker)) {
-  // JSON is valid YAML. This is user-managed after initialization, including Soul edits in Web.
-  await writeFile(join(profile, 'cordis.patch.yml'), JSON.stringify([{insert: [{id: 'soul-md', name: 'dsh-soul-md', config: {
-    cards: {'大肥鱼': soul}, active: '大肥鱼', complete: true, memory: {inject: false, recall: 'off'},
-  }}]}], null, 2));
-  await writeFile(seedMarker, '1');
+const patchFile = join(profile, 'cordis.patch.yml');
+const seedRecord = join(home, 'pet-soul-seed.json');
+// JSON is valid YAML. The card is user-managed after initialization, including Soul edits in Web.
+const soulPatch = text => JSON.stringify([{insert: [{id: 'soul-md', name: 'dsh-soul-md', config: {
+  cards: {'大肥鱼': text}, active: '大肥鱼', complete: true, memory: {inject: false, recall: 'off'},
+}}]}], null, 2);
+const recordSoul = text => writeFile(seedRecord, JSON.stringify({soul: hash(text)}, null, 2));
+const force = process.env.PET_SOUL_UPDATE === '1';
+const patchText = await readFile(patchFile, 'utf8').catch(error => {
+  if (error.code === 'ENOENT') return null;
+  throw error;
+});
+const previous = await readFile(seedRecord, 'utf8').then(JSON.parse).catch(() => undefined);
+const plan = planSeed({soul, card: patchText === null ? undefined : currentCard(patchText),
+  patch: patchText !== null, recorded: previous?.soul, force});
+if (plan.action === 'write') {
+  await writeFile(patchFile, soulPatch(soul));
+  await recordSoul(soul);
+  console.info('Soul card seeded from config/soul.md');
+} else if (plan.action === 'record') {
+  await recordSoul(soul);
+} else if (plan.action === 'conflict') {
+  // Keep the card in use: changing it silently would discard an edit made in Web. Nothing is
+  // recorded, so this stays a conflict on every start until someone decides.
+  console.warn(`Soul card differs from config/soul.md (${plan.reason}); keeping the profile card. `
+    + 'Set PET_SOUL_UPDATE=1 for one start to replace it with the image soul.');
 }
+if (!await exists(seedMarker)) await writeFile(seedMarker, '1');
 // Runtime policy is an overlay, separate from mutable user settings and immutable image dependencies.
 const overlay = join(home, 'pet-runtime.patch.yml');
 await writeFile(overlay, JSON.stringify([

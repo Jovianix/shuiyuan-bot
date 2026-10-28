@@ -23,7 +23,7 @@ npm test
 - `secrets/deepseek-api-key`：只放 DeepSeek Key，文件权限设为 `600`。
 - `config/pet.json`：复制 [配置示例](config/pet.example.json)，填写账号用户名和稳定的用户 ID。插件会用凭据读取当前登录身份，核对两者一致。
 
-Soul 初始内容在 [config/soul.md](config/soul.md)。容器首次启动将它导入 DSH Profile；之后在 DSH 的 Soul 插件设置中修改角色卡，重建镜像不会覆盖已保存的卡片。
+Soul 内容在 [config/soul.md](config/soul.md)，是这份卡片的来源。容器每次启动都比较它与 Profile 中实际使用的卡片：卡片仍是上次从镜像导入的那一份时，直接更新为 `soul.md` 的新内容；在 DSH Web 里改过的卡片保持不动，只输出一条警告。要让镜像的 Soul 强制覆盖 Web 里的修改，设置 `PET_SOUL_UPDATE=1` 启动一次，随后移除。首次启动写入的 hash 记录在数据卷的 `pet-soul-seed.json`。
 
 ```sh
 docker compose up -d --build
