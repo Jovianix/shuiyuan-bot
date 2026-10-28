@@ -97,7 +97,7 @@ export class Discourse implements Forum {
   }
   /** One create request. The server's own response is the verification; no read-back. */
   async send(topic: number, parent: number, raw: string): Promise<CreatedPost> {
-    if (this.config.mode !== 'reply' || !this.config.replyTopics.includes(topic)) throw new PermanentError('Posting is not enabled for this topic');
+    if (this.config.mode !== 'reply') throw new PermanentError('Posting is not enabled');
     return this.call<CreatedPost>('discourse_create_post', {topic_id: topic, reply_to_post_number: parent, raw});
   }
   async close(): Promise<void> {

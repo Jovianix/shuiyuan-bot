@@ -3,7 +3,7 @@ import { resolve } from 'node:path';
 
 export interface Config {
   site: string; owner: string; ownerId: number; petId: string; petName: string;
-  mode: 'draft' | 'reply'; replyTopics: number[]; scan: boolean; scanIntervalMs: number; scanPageSize: number; catchUpMs: number;
+  mode: 'draft' | 'reply'; scan: boolean; scanIntervalMs: number; scanPageSize: number; catchUpMs: number;
   reconcileIntervalMs: number; reconcileWindowMs: number;
   dataDir: string; profilePath: string; mcpScript: string; httpGapMs: number;
   provider: string; model: string; timeoutMs: number; maxTokens: number;
@@ -14,7 +14,7 @@ export function loadConfig(path: string): Config {
   const data = JSON.parse(readFileSync(path, 'utf8')) as Partial<Config>;
   const config: Config = {
     site: 'https://shuiyuan.sjtu.edu.cn', owner: '', ownerId: 0,
-    petId: 'fish', petName: '大肥鱼', mode: 'draft', replyTopics: [], scan: false,
+    petId: 'fish', petName: '大肥鱼', mode: 'draft', scan: false,
     // One request per scan whatever the page size; 20 covers a burst of calls between two scans.
     scanIntervalMs: 60_000, scanPageSize: 20, catchUpMs: 3 * 3_600_000,
     reconcileIntervalMs: 300_000, reconcileWindowMs: 1_800_000,
@@ -31,8 +31,6 @@ export function loadConfig(path: string): Config {
   if (!/^[\w.-]+$/.test(config.owner) || !Number.isSafeInteger(config.ownerId) || config.ownerId <= 0) throw new Error('Configure owner and stable ownerId');
   if (!/^[\w-]+$/.test(config.petId) || !config.petName.trim() || /[【】\r\n]/u.test(config.petName)) throw new Error('Invalid pet identity');
   if (!['draft', 'reply'].includes(config.mode) || typeof config.scan !== 'boolean') throw new Error('Invalid mode or scan');
-  if (!Array.isArray(config.replyTopics) || config.replyTopics.some(x => !Number.isSafeInteger(x) || x <= 0)) throw new Error('Invalid replyTopics');
-  if (config.mode === 'reply' && config.replyTopics.length === 0) throw new Error('Reply mode requires explicit topic allowlist');
   for (const key of ['scanIntervalMs', 'scanPageSize', 'catchUpMs', 'reconcileIntervalMs', 'reconcileWindowMs', 'httpGapMs', 'timeoutMs', 'maxTokens', 'contextChars', 'maxAttempts'] as const) {
     if (!Number.isSafeInteger(config[key]) || config[key] <= 0) throw new Error(`Invalid ${key}`);
   }

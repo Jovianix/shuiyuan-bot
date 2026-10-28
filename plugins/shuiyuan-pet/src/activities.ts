@@ -34,8 +34,7 @@ export class Activities {
    */
   fail(task: Task, error: string): void {
     const context = this.store.task(task.id).context;
-    const notify = !!context && !task.answer?.notice && task.mode === 'reply' && this.config.mode === 'reply'
-      && this.config.replyTopics.includes(context.source.topic_id);
+    const notify = !!context && !task.answer?.notice && task.mode === 'reply' && this.config.mode === 'reply';
     this.store.update(task.id, notify
       ? {state: 'draft_ready', attempts: 0, available_at: 0, error, answer: {notice: true, sessionId: '', turn: 0, soulHash: '',
           text: replyText(`抱歉，${this.config.petName}这次没能回复，请稍后再试。`)}}
@@ -115,10 +114,8 @@ export class Activities {
       const answer = this.forumAnswer(raw);
       // discourse_create_post rejects longer bodies before any request, which would read as an unknown send.
       if (!answer.text.trim() || answer.text.length > 30_000) throw new Error('Invalid final response');
-      // Outside the reply allowlist the answer is kept as a reviewable draft rather than skipped after generation.
-      const mode = task.mode === 'reply' && this.config.replyTopics.includes(source.topic_id) ? 'reply' : 'draft';
       this.store.transaction(() => {
-        this.store.update(task.id, {state: 'draft_ready', mode, answer, error: null});
+        this.store.update(task.id, {state: 'draft_ready', answer, error: null});
         this.store.record(task.id, 'draft', {context, answer});
       });
     } catch (error) {
@@ -147,7 +144,7 @@ export class Activities {
       else retryLater('Send preflight read failed; nothing sent');
       return;
     }
-    if (!this.config.replyTopics.includes(head.topic_id) || head.topic_id !== source.topic_id
+    if (head.topic_id !== source.topic_id
       || head.post_number !== source.post_number || sourceHash(head.raw) !== task.context.sourceHash) {
       this.store.update(task.id, {state: 'skipped', error: 'Source changed, invocation removed, or topic not allowed'}); return;
     }

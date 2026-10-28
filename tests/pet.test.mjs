@@ -13,7 +13,7 @@ import { ForumError, PermanentError } from '../plugins/shuiyuan-pet/dist/types.j
 
 const config = {
   site:'https://forum.invalid', owner:'owner', ownerId:10, petId:'fish', petName:'大肥鱼',
-  mode:'draft', replyTopics:[77], relatedLimit:4, contextChars:12000, maxAttempts:3, catchUpMs:3*3_600_000,
+  mode:'draft', relatedLimit:4, contextChars:12000, maxAttempts:3, catchUpMs:3*3_600_000,
   timeoutMs:2000, provider:'test', model:'test', maxTokens:200, workspace:'/tmp',
 };
 const post = (id=1, changes={}) => ({id, topic_id:77, post_number:id, user_id:20, username:'caller',
@@ -217,11 +217,6 @@ test('a reply-mode invocation that cannot be generated is answered with one fail
   assert.equal(f.store.task(id).answer.notice,true);
   await f.activities.tick(signal());
   assert.equal(f.store.task(id).state,'sent');assert.equal(f.sends,1);assert.match(f.store.task(id).error,/failure notice/);
-});
-test('a reply-mode invocation outside the allowlist is kept as a draft',async t=>{
-  const f=fixture(t,{config:{mode:'reply',replyTopics:[88]}});const id=f.store.enqueue(1,'reply','mentions');
-  await f.activities.tick(signal());await f.activities.tick(signal());
-  assert.equal(f.store.task(id).state,'draft_ready');assert.equal(f.store.task(id).mode,'draft');assert.equal(f.sends,0);
 });
 const act=(id,ago=0,type='mentions')=>({post_id:id,topic_id:77,post_number:id,created_at:new Date(Date.now()-ago).toISOString(),action_type:type});
 test('the first scan only records a baseline; later scans read only posts not on the previous page',async t=>{
