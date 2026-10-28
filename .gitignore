@@ -5,6 +5,10 @@
 /config/pet.json
 # Design notes stay local.
 /docs/
+# Skill definitions are shared, even though the global ignore hides .agents/.
+!/.agents/
+!/.agents/skills/
+!/.agents/skills/**
 
 # Created by https://www.toptal.com/developers/gitignore/api/node,linux,macos
 # Edit at https://www.toptal.com/developers/gitignore?templates=node,linux,macos
