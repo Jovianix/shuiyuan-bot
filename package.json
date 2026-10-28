@@ -14,13 +14,22 @@
     "mcp": "node node_modules/@discourse/mcp/dist/index.js --profile secrets/discourse-profile.json --tools_mode discourse_api_only",
     "mcp:readonly": "node node_modules/@discourse/mcp/dist/index.js --profile secrets/discourse-profile.json --tools_mode discourse_api_only --allow_writes false --read_only true",
     "check:mcp": "node scripts/check-mcp-readonly.mjs",
-    "check:mcp:patch": "node scripts/check-mcp-patch-readonly.mjs"
+    "check:mcp:patch": "node scripts/check-mcp-patch-readonly.mjs",
+    "build": "tsc",
+    "pretest": "npm run build"
   },
   "dependencies": {
     "@discourse/mcp": "0.3.1",
+    "@modelcontextprotocol/sdk": "1.32.0",
+    "markdown-it": "14.3.3",
     "patch-package": "8.0.1"
   },
   "devDependencies": {
-    "@modelcontextprotocol/sdk": "1.30.0"
+    "@types/markdown-it": "14.2.0",
+    "@types/node": "24.19.2",
+    "typescript": "5.9.3"
+  },
+  "overrides": {
+    "@modelcontextprotocol/sdk": "1.32.0"
   }
 }
