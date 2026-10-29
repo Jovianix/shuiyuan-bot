@@ -26,6 +26,8 @@ export interface Forum {
   recentOwnPosts(topic: number): Promise<Post[]>;
   /** Exact floors by post ID: one request for up to 50 ids. */
   readByIds(topic: number, ids: number[]): Promise<Post[]>;
+  /** Title and size of one topic. The post endpoints never carry the title. */
+  topicInfo(topic: number): Promise<TopicInfo>;
   /** Ancestor chain or direct replies of one post, as the forum reports them. */
   thread(postId: number, direction: ThreadDirection): Promise<Post[]>;
   /** Post-level search hits. Callers filter them to the topics they may read. */
@@ -34,6 +36,11 @@ export interface Forum {
   close(): Promise<void>;
 }
 export type ThreadDirection = 'ancestors' | 'replies';
+/** What one topic is about and how big it is, from a single topic read. */
+export interface TopicInfo {
+  id: number; title: string; slug: string; categoryId: number | null;
+  tags: string[]; postsCount: number; highestPostNumber: number | null;
+}
 export interface ContextPack {
   source: Post; related: Post[]; missing: string[]; truncated: number[];
   sourceHash: string;

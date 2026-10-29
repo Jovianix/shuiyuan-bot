@@ -45,13 +45,17 @@ function fixture(t, options={}) {
   return {store,forum,model,activities,source,cfg,dir,get sends(){return sends;},get generations(){return generations;},get reads(){return reads;}};
 }
 /** A forum whose reader tools answer from fixed floors; `reads` counts tool-driven requests. */
-function forumStub(post=p => p){
-  const floors=new Map([[1,post(1)],[2,post(2)]]);
+function forumStub(makePost = post){
+  // The default used to be the identity function, so the map held bare numbers and every
+  // topic filter dropped them; a short "nothing found" message hid that for a long time.
+  const floors=new Map([[1,makePost(1)],[2,makePost(2)]]);
   const reads=[];const forum={reads,
     readAround:async(topic,floor,limit)=>{reads.push(['readAround',topic,floor,limit]);return [...floors.values()];},
     readByIds:async(topic,ids)=>{reads.push(['readByIds',topic,ids]);return [...floors.values()];},
-    thread:async(id,direction)=>{reads.push(['thread',id,direction]);return [post(2)];},
-    searchPosts:async(query)=>{reads.push(['searchPosts',query]);return [post(2)];},
+    thread:async(id,direction)=>{reads.push(['thread',id,direction]);return [makePost(2)];},
+    searchPosts:async(query)=>{reads.push(['searchPosts',query]);return [makePost(2)];},
+    topicInfo:async topic=>{reads.push(['topicInfo',topic]);return {id:topic,title:'测试主题',slug:'t',
+      categoryId:null,tags:['测试'],postsCount:9,highestPostNumber:9};},
     locate:async()=>{throw new Error('not used');},actions:async()=>[],recentOwnPosts:async()=>[],
     send:async()=>{throw new Error('not used');},close:async()=>{}};
   return forum;
@@ -314,7 +318,7 @@ test('DSH adapter registers only the forum readers, then prompts, flushes and di
   const model=new DshModel(ctx,config);const result=await model.generate({source:post(),related:[],missing:[],truncated:[],sourceHash:'h'},'session',signal(),forumStub());
   assert.equal(result.text,'你好呀');
   // Every reader is registered before the restriction that keeps harness tools out.
-  assert.deepEqual(calls.filter(c=>c[0]==='register').map(c=>c[1]),['read_around','read_posts','read_thread','search']);
+  assert.deepEqual(calls.filter(c=>c[0]==='register').map(c=>c[1]),['read_around','read_posts','read_thread','search','read_topic']);
   assert.equal(calls.findIndex(c=>c[0]==='register')<calls.findIndex(c=>c[0]==='restrict'),true);
   assert.deepEqual(calls.find(c=>c[0]==='restrict')[1],{allow:[]});
   // The guard denies anything that is not a forum reader, and permits these.
@@ -322,7 +326,7 @@ test('DSH adapter registers only the forum readers, then prompts, flushes and di
   assert.match(denied,/run no tools other than/);assert.equal(allowed,undefined);
   // The prompt is the compact text payload, not raw JSON of every post field.
   const prompt=calls.find(c=>c[0]==='prompt')[1];
-  assert.match(prompt,/\[调用帖\]/);assert.match(prompt,/#1 caller\(u20\)/);
+  assert.match(prompt,/\[调用帖\]/);assert.match(prompt,/#1 \(id 1\) caller\(u20\)/);
   assert.doesNotMatch(prompt,/sourceHash|post_type|accepted_answer/);
   assert.equal((await model.recover('session')).text,'你好呀');
 });
@@ -332,11 +336,12 @@ test('payload is compact text with an addressable header, not a JSON dump',()=>{
   const text=renderPayload({source,related:[post(2,{raw:'父帖'})],missing:['88/4: unavailable'],truncated:[7],sourceHash:'abc'},config);
   assert.match(text,/^这是一次论坛调用。/);
   assert.match(text,/主题 77 的第 8 楼/);
-  // Header carries the floor, a citable author id, a timestamp and the parent floor.
-  assert.match(text,/#8 caller\(u20\) \d{4}-\d\d-\d\d \d\d:\d\dZ →#2\n/);
+  // Header carries the floor, the post id a tool call needs, a citable author id, a
+  // timestamp and the parent floor.
+  assert.match(text,/#8 \(id 8\) caller\(u20\) \d{4}-\d\d-\d\d \d\d:\d\dZ →#2\n/);
   // A quote inside the source stays: it is what the caller actually wrote.
   assert.match(text,/\n\[quote="a, post:2\]x\[\/quote\]\n正文/);
-  assert.match(text,/#2 caller\(u20\)/);
+  assert.match(text,/#2 \(id 2\) caller\(u20\)/);
   assert.match(text,/88\/4: unavailable/);
   assert.match(text,/#7/);
   for(const noise of ['sourceHash','post_type','accepted_answer','archetype','"raw"','topic_slug'])
@@ -357,7 +362,7 @@ test('reader tools refuse other topics, charge the call budget, and cap the char
   const reader=new Reader(forum,{...config,readCalls:2,readChars:50,readTotal:60,readSpan:11},
     {source:post(1,{topic_id:77}),related:[],missing:[],truncated:[],sourceHash:'h'});
   const tools=Object.fromEntries(reader.definitions().map(tool=>[tool.name,tool]));
-  assert.deepEqual(Object.keys(tools).sort(),['read_around','read_posts','read_thread','search']);
+  assert.deepEqual(Object.keys(tools).sort(),['read_around','read_posts','read_thread','read_topic','search']);
   // A topic outside the task is refused before any request is made.
   await assert.rejects(tools.read_around.execute({topic_id:99,post_number:1},{}),/只能读取与本次调用相关的主题/);
   assert.equal(forum.reads.length,0);

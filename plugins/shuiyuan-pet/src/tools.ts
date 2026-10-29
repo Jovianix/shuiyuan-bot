@@ -73,9 +73,10 @@ export class Reader {
     return left;
   }
 
-  private bound(body: string): string {
-    const room = this.room();
-    const out = body.length > room ? `${body.slice(0, room)}\n…（后续内容因预算截断）` : body;
+  /** `reserve` keeps room for a suffix the caller appends after bounding the body. */
+  private bound(body: string, reserve = 0): string {
+    const room = this.room() - reserve;
+    const out = body.length > room ? `${body.slice(0, Math.max(0, room))}\n…（后续内容因预算截断）` : body;
     this.chars += out.length;
     return out;
   }
@@ -87,14 +88,26 @@ export class Reader {
     return id as number;
   }
 
-  private floors(topic: number, posts: Post[]): string {
+  /**
+   * Rendered floors, or a note that says why there were none. An empty result previously
+   * read as "this floor does not exist", so a model would probe 20, then 1, then give up,
+   * spending its call budget on floors that were simply outside the topic.
+   */
+  private floors(topic: number, posts: Post[], asked?: {floors?: number[]; ids?: number[]}): string {
     const wanted = posts.filter(post => post.topic_id === topic);
-    if (!wanted.length) return `主题 ${topic} 没有读到对应的可见楼层。`;
-    return this.bound(wanted.map(post => renderPost(post)).join('\n\n'));
+    if (!wanted.length) {
+      const what = asked?.ids ? `帖子 ${asked.ids.join('、')}` : '这些楼层';
+      return `主题 ${topic} 里没有读到 ${what}。可能是楼层号超出范围、已被删除，或你用的是帖子 ID 而不是楼层号`
+        + `（每帖开头形如 #楼层号 (id 帖子ID)，read_around 取楼层号，read_posts 取帖子 ID）。`;
+    }
+    const numbers = wanted.map(post => post.post_number);
+    const range = `\n\n（本次读到 #${Math.min(...numbers)}–#${Math.max(...numbers)}，共 ${wanted.length} 楼）`;
+    // The range is charged too, so a bounded read cannot exceed the turn's budget.
+    return this.bound(wanted.map(post => renderPost(post)).join('\n\n'), range.length) + range;
   }
 
   definitions(): ToolDefinitionLike[] {
-    return [this.around(), this.byIds(), this.thread(), this.search()];
+    return [this.around(), this.byIds(), this.thread(), this.search(), this.topicInfo()];
   }
 
   /** A contiguous chunk of one topic, which is how a discussion is actually read. */
@@ -114,7 +127,7 @@ export class Reader {
         if (!Number.isSafeInteger(post_number) || post_number <= 0) throw new Error('楼层号必须是正整数。');
         const limit = Math.min(Math.max(1, span ?? this.config.readSpan), 50);
         this.charge();
-        return {text: this.floors(topic, await this.forum.readAround(topic, post_number, limit))};
+        return {text: this.floors(topic, await this.forum.readAround(topic, post_number, limit), {floors: [post_number]})};
       },
     };
   }
@@ -135,7 +148,7 @@ export class Reader {
         const ids = [...new Set(post_ids.filter(id => Number.isSafeInteger(id) && id > 0))].slice(0, 50);
         if (!ids.length) throw new Error('需要至少一个有效的帖子 ID。');
         this.charge();
-        return {text: this.floors(topic, await this.forum.readByIds(topic, ids))};
+        return {text: this.floors(topic, await this.forum.readByIds(topic, ids), {ids})};
       },
     };
   }
@@ -158,6 +171,33 @@ export class Reader {
         const posts = (await this.forum.thread(post_id, direction)).filter(post => this.topics.has(post.topic_id));
         if (!posts.length) return {text: '这一楼没有读到可用的回复链。'};
         return {text: this.bound(posts.map(post => renderPost(post)).join('\n\n'))};
+      },
+    };
+  }
+
+  /**
+   * What the thread is about. Floors alone say nothing about the subject, and the post
+   * endpoints report topic_title as null, so this is the only way the model can learn it.
+   */
+  private topicInfo(): ToolDefinitionLike {
+    return {
+      name: 'read_topic',
+      description: '读取主题的标题、分类、标签和总楼层数，用来判断这段讨论在讲什么、有多大。',
+      parameters: compileParameters({
+        topic_id: {type: 'integer', required: true, description: '主题 ID'},
+      }),
+      output: {schema: TEXT_RESULT, render: text},
+      execute: async args => {
+        const {topic_id} = args as {topic_id: number};
+        const id = this.topic(topic_id);
+        this.charge();
+        const info = await this.forum.topicInfo(id);
+        const lines = [
+          `主题 ${info.id}：${info.title}`,
+          `共 ${info.postsCount} 楼${info.highestPostNumber ? `，最高楼层 #${info.highestPostNumber}` : ''}`,
+        ];
+        if (info.tags.length) lines.push(`标签：${info.tags.join('、')}`);
+        return {text: this.bound(lines.join('\n'))};
       },
     };
   }

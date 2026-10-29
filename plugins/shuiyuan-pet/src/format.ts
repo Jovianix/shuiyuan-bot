@@ -24,12 +24,16 @@ export function author(post: Pick<Post, 'username' | 'user_id'>): string {
 /**
  * One post as compact text: an addressable header the model can name in a tool call,
  * then the body. JSON was costing more in key names and escaping than in content.
+ *
+ * The header carries both numbers because the model needs both: the floor is how people
+ * refer to a post in the discussion (and what read_around takes), while the post id is what
+ * read_posts and read_thread require. Without the id the model had to guess floors.
  */
 export function renderPost(post: Post, bodyLimit = Number.POSITIVE_INFINITY): string {
   const reply = post.reply_to_post_number ? ` →#${post.reply_to_post_number}` : '';
   const raw = stripSignature(post.raw);
   const body = raw.length > bodyLimit ? `${raw.slice(0, bodyLimit)}…` : raw;
-  return `#${post.post_number} ${author(post)} ${stamp(post.created_at)}${reply}\n${body}`;
+  return `#${post.post_number} (id ${post.id}) ${author(post)} ${stamp(post.created_at)}${reply}\n${body}`;
 }
 
 /** A referenced floor the model has not read: enough to decide whether it is worth a call. */

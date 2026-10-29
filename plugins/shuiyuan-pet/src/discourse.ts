@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import type { Config } from './config.js';
-import type { Activity, CreatedPost, Forum, Post, PostHead, ThreadDirection } from './types.js';
+import type { Activity, CreatedPost, Forum, Post, PostHead, ThreadDirection, TopicInfo } from './types.js';
 import { ForumError, PermanentError } from './types.js';
 
 export class Discourse implements Forum {
@@ -104,6 +104,30 @@ export class Discourse implements Forum {
     // known-private topic is refused here; the pre-send read still checks the topic.
     if (data.archetype === 'private_message') throw new PermanentError('Only regular forum topics are supported');
     return this.complete(data.posts.filter(p => p.topic_id === topic), data.archetype);
+  }
+  /**
+   * Topic title and size. The post endpoints never report the title (post_ids returns
+   * topic_title: null), so a model that only reads floors cannot tell what the thread is
+   * about. `post_limit: 1` keeps this to one request and one extra post we discard.
+   */
+  async topicInfo(topic: number): Promise<TopicInfo> {
+    const data = await this.call<{id: number; title: string; slug: string; category_id: number | null;
+      tags?: (string | {name?: string})[]; posts_count?: number; highest_post_number?: number | null;
+      archetype?: string | null}>(
+      'discourse_read_topic', {topic_id: topic, post_limit: 1});
+    if (data.archetype === 'private_message') throw new PermanentError('Only regular forum topics are supported');
+    // This endpoint reports tags as objects ({id, name, slug}), not strings.
+    const tags = Array.isArray(data.tags)
+      ? data.tags.map(tag => typeof tag === 'string' ? tag : tag?.name)
+        .filter((tag): tag is string => typeof tag === 'string' && !!tag)
+      : [];
+    return {
+      id: data.id, title: typeof data.title === 'string' ? data.title : `主题 ${topic}`,
+      slug: typeof data.slug === 'string' ? data.slug : '', categoryId: data.category_id ?? null,
+      tags,
+      postsCount: Number.isSafeInteger(data.posts_count) ? data.posts_count! : 0,
+      highestPostNumber: Number.isSafeInteger(data.highest_post_number) ? data.highest_post_number! : null,
+    };
   }
   /** `reply_history` walks up the ancestors; `direct_replies` returns the floors answering this one. */
   async thread(postId: number, direction: ThreadDirection): Promise<Post[]> {
