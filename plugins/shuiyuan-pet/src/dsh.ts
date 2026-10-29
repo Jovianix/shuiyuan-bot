@@ -29,6 +29,12 @@ export interface DshContext {
     signal: AbortSignal; setup(scope: AgentScope, agent: Agent): void;
   }): Promise<{agent: Agent; dispose(): Promise<void>}>};
   sessions: {flush(session: Session): Promise<boolean>};
+  // The durable image store. `saveImage` validates the bytes against the declared media
+  // type and returns the reference the provider adapter reads them back through.
+  attachments: {
+    saveImage(input: {data: Uint8Array; mediaType: string; name?: string}):
+      Promise<{attachmentId: string; mediaType: string; bytes: number; width: number; height: number; name?: string}>;
+  };
   sessionPersistence: {
     stat(id: string): Promise<unknown>;
     open(id: string, access: 'read'): Promise<{read(): Promise<{events: Event[]}>; close(): Promise<void>}>;
@@ -60,7 +66,12 @@ export class DshModel implements Model {
   async generate(input: ContextPack, sessionId: string, signal: AbortSignal, forum: Forum): Promise<Answer> {
     signal.throwIfAborted();
     // A reader per task: its budgets belong to this turn, not to the plugin's lifetime.
-    const reader = new Reader(forum, this.config, input);
+    const reader = new Reader(forum, this.config, input, {
+      // The harness types images more narrowly than this package does; the store re-checks
+      // the declared type against the decoded bytes, so the cast cannot widen what is stored.
+      save: ({data, mediaType, name}) => this.ctx.attachments.saveImage(
+        {data, mediaType: mediaType as 'image/png', name}),
+    });
     const tools = reader.definitions();
     const names = tools.map(tool => tool.name);
     const handle = await this.ctx.agents.create({sessionId,

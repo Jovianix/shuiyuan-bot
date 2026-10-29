@@ -56,6 +56,9 @@ function forumStub(makePost = post){
     searchPosts:async(query)=>{reads.push(['searchPosts',query]);return [makePost(2)];},
     topicInfo:async topic=>{reads.push(['topicInfo',topic]);return {id:topic,title:'测试主题',slug:'t',
       categoryId:null,tags:['测试'],postsCount:9,highestPostNumber:9};},
+    readUpload:async(url,maxBytes)=>{reads.push(['readUpload',url,maxBytes]);
+      if(url.includes('missing'))throw new PermanentError('readUpload failed (HTTP 404)',404);
+      return {mediaType:'image/jpeg',data:new Uint8Array([0xff,0xd8,0xff])};},
     locate:async()=>{throw new Error('not used');},actions:async()=>[],recentOwnPosts:async()=>[],
     send:async()=>{throw new Error('not used');},close:async()=>{}};
   return forum;
@@ -318,7 +321,7 @@ test('DSH adapter registers only the forum readers, then prompts, flushes and di
   const model=new DshModel(ctx,config);const result=await model.generate({source:post(),related:[],missing:[],truncated:[],sourceHash:'h'},'session',signal(),forumStub());
   assert.equal(result.text,'你好呀');
   // Every reader is registered before the restriction that keeps harness tools out.
-  assert.deepEqual(calls.filter(c=>c[0]==='register').map(c=>c[1]),['read_around','read_posts','read_thread','search','read_topic']);
+  assert.deepEqual(calls.filter(c=>c[0]==='register').map(c=>c[1]),['read_around','read_posts','read_thread','search','read_topic','read_images']);
   assert.equal(calls.findIndex(c=>c[0]==='register')<calls.findIndex(c=>c[0]==='restrict'),true);
   assert.deepEqual(calls.find(c=>c[0]==='restrict')[1],{allow:[]});
   // The guard denies anything that is not a forum reader, and permits these.
@@ -362,7 +365,7 @@ test('reader tools refuse other topics, charge the call budget, and cap the char
   const reader=new Reader(forum,{...config,readCalls:2,readChars:50,readTotal:60,readSpan:11},
     {source:post(1,{topic_id:77}),related:[],missing:[],truncated:[],sourceHash:'h'});
   const tools=Object.fromEntries(reader.definitions().map(tool=>[tool.name,tool]));
-  assert.deepEqual(Object.keys(tools).sort(),['read_around','read_posts','read_thread','read_topic','search']);
+  assert.deepEqual(Object.keys(tools).sort(),['read_around','read_images','read_posts','read_thread','read_topic','search']);
   // A topic outside the task is refused before any request is made.
   await assert.rejects(tools.read_around.execute({topic_id:99,post_number:1},{}),/只能读取与本次调用相关的主题/);
   assert.equal(forum.reads.length,0);
@@ -382,13 +385,63 @@ test('reader tools reject malformed arguments instead of trusting the model',asy
   await assert.rejects(tools.read_thread.execute({post_id:2,direction:'sideways'},{}),/ancestors/);
   await assert.rejects(tools.search.execute({query:'   '},{}),/不能为空/);
 });
+test('read_images fetches only refs from posts the task has seen, and answers with image blocks',async()=>{
+  const forum=forumStub(id=>post(id,{raw:id===2?'旁边一楼\n![b|10x10](upload://b.png)':'正文'}));
+  const saved=[];
+  const images={save:async input=>{saved.push(input);
+    return {attachmentId:`att-${saved.length}`,mediaType:input.mediaType,bytes:input.data.byteLength,width:621,height:435,name:input.name};}};
+  const source=post(1,{raw:'看图\n![a](upload://a.jpeg)\n![m](upload://missing.png)'});
+  const reader=new Reader(forum,{...config,readCalls:10,readChars:6000,readTotal:50_000,readSpan:11,imageBytes:1024},
+    {source,related:[],missing:[],truncated:[],sourceHash:'h'},images);
+  const tools=Object.fromEntries(reader.definitions().map(tool=>[tool.name,tool]));
+  // Not an upload ref at all: refused before any request.
+  await assert.rejects(tools.read_images.execute({refs:['https://evil.invalid/x.png']},{}),/至少一个 upload/);
+  // An upload ref no post in this task mentioned is not fetched, even though the key could.
+  await assert.rejects(tools.read_images.execute({refs:['upload://elsewhere.png']},{}),/不在已读到的楼层里/);
+  // Nor is one from a floor the model has not read yet.
+  await assert.rejects(tools.read_images.execute({refs:['upload://b.png']},{}),/不在已读到的楼层里/);
+  assert.equal(forum.reads.length,0);
+  // Duplicates collapse, and the per-image byte cap travels with the request.
+  const value=await tools.read_images.execute({refs:['upload://a.jpeg','upload://a.jpeg','upload://missing.png','upload://elsewhere.png']},{});
+  assert.deepEqual(forum.reads,[['readUpload','upload://a.jpeg',1024],['readUpload','upload://missing.png',1024]]);
+  assert.equal(saved.length,1);assert.equal(saved[0].name,'a.jpeg');
+  // A failed or unseen image is reported next to the ones that worked rather than failing the call.
+  assert.match(value.text,/a\.jpeg/);assert.match(value.text,/没读到.*missing\.png/);assert.match(value.text,/没有去取.*elsewhere\.png/);
+  // render() hands the model a line and then the pictures themselves.
+  const blocks=tools.read_images.output.render({},value);
+  assert.deepEqual(blocks.map(b=>b.type),['text','image']);
+  assert.equal(blocks[1].attachment.attachmentId,'att-1');
+  // Once a floor has been read, its images become readable.
+  const around=await tools.read_around.execute({topic_id:77,post_number:2},{});
+  assert.match(around.text,/\[附图 1 张\] upload:\/\/b\.png（b）/);
+  await tools.read_images.execute({refs:['upload://b.png']},{});
+  assert.deepEqual(forum.reads.at(-1),['readUpload','upload://b.png',1024]);
+});
+test('read_images takes at most four images per call',async()=>{
+  const forum=forumStub();
+  const raw=[1,2,3,4,5].map(n=>`![${n}](upload://${n}.png)`).join('\n');
+  const reader=new Reader(forum,{...config,readCalls:10,readChars:6000,readTotal:50_000},{source:post(1,{raw}),related:[],missing:[],truncated:[],sourceHash:'h'},
+    {save:async input=>({attachmentId:input.name,mediaType:input.mediaType,bytes:1,width:1,height:1,name:input.name})});
+  const tool=reader.definitions().find(t=>t.name==='read_images');
+  await tool.execute({refs:[1,2,3,4,5].map(n=>`upload://${n}.png`)},{});
+  assert.equal(forum.reads.length,4);
+});
+test('posts name their images so the model knows there is something to look at',()=>{
+  const raw='@owner【大肥鱼】这是什么？\n![IMG\\_1216|621x435](upload://rHlMyPmcgbhuVVJsmM4r6sFxL0w.jpeg)';
+  const payload=renderPayload({source:post(1,{raw}),related:[],missing:[],truncated:[],sourceHash:'h'},config);
+  // The handle is the exact ref read_images takes; the alt text loses its size suffix and escapes.
+  assert.match(payload,/\[附图 1 张\] upload:\/\/rHlMyPmcgbhuVVJsmM4r6sFxL0w\.jpeg（IMG_1216）/);
+  // A post without images gets no note at all.
+  assert.doesNotMatch(renderPayload({source:post(1),related:[],missing:[],truncated:[],sourceHash:'h'},config),/附图/);
+});
 test('output.render reads the canonical value from its second argument',async()=>{
   // The registry calls render(args, value); a one-argument renderer silently receives the
   // arguments object and returns undefined text, which fails as INVALID_TOOL_OUTPUT at runtime.
   const reader=new Reader(forumStub(),config,{source:post(1),related:[],missing:[],truncated:[],sourceHash:'h'});
   for(const tool of reader.definitions()){
-    const args={topic_id:77,post_number:1,post_ids:[1],post_id:1,direction:'ancestors',query:'x'};
-    const blocks=tool.output.render(args,{text:'正文'});
-    assert.deepEqual(blocks,[{type:'text',text:'正文'}],tool.name);
+    const args={topic_id:77,post_number:1,post_ids:[1],post_id:1,direction:'ancestors',query:'x',refs:['upload://a.png']};
+    // The image tool answers with a line plus pictures; every other tool answers with text.
+    const value=tool.name==='read_images'?{text:'正文',images:[]}:{text:'正文'};
+    assert.deepEqual(tool.output.render(args,value),[{type:'text',text:'正文'}],tool.name);
   }
 });

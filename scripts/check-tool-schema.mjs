@@ -16,7 +16,7 @@ const {assertSupportedJsonSchema} = await import(pathToFileURL(join(toolsRoot, '
 const {Reader} = await import('/repo/plugins/shuiyuan-pet/dist/tools.js');
 
 const config = {readCalls: 4, readChars: 6000, readTotal: 20000, readSpan: 11};
-const pack = {source: {topic_id: 77}, related: [], missing: [], truncated: [], sourceHash: 'x'};
+const pack = {source: {topic_id: 77, raw: ''}, related: [], missing: [], truncated: [], sourceHash: 'x'};
 const reader = new Reader({}, config, pack);
 
 let failed = 0;

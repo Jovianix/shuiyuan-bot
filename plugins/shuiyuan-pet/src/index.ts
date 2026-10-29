@@ -9,7 +9,7 @@ import { Activities } from './activities.js';
 import { DshModel, type DshContext } from './dsh.js';
 
 export const name = 'shuiyuan-pet';
-export const inject = ['agents', 'tools', 'systemPrompt', 'sessions', 'sessionPersistence'];
+export const inject = ['agents', 'tools', 'systemPrompt', 'sessions', 'sessionPersistence', 'attachments'];
 // The container lock keeps other processes off the database. Within this process, a reload
 // stops the previous instance first, so there is never a second worker able to send.
 const RUNNING = Symbol.for('shuiyuan-pet.stop');

@@ -17,8 +17,20 @@ export interface Activity {
   post_id: number | null; topic_id?: number | null; post_number?: number | null;
   created_at: string; action_type?: string;
 }
+/** One upload's bytes, resolved with the caller's own credentials. */
+export interface UploadedImage { mediaType: string; data: Uint8Array; }
+/** Where a saved image lives. Mirrors the harness attachment reference the model receives. */
+export interface StoredImage {
+  attachmentId: string; mediaType: string; bytes: number; width: number; height: number; name?: string;
+}
+/** The harness attachment store, as the image reader needs it. */
+export interface ImageSaver {
+  save(input: {data: Uint8Array; mediaType: string; name?: string}): Promise<StoredImage>;
+}
 export interface Forum {
   locate(id: number): Promise<PostHead>;
+  /** One upload by its `upload://` reference or site path, for an image the model asked to see. */
+  readUpload(url: string, maxBytes: number): Promise<UploadedImage>;
   /** Up to `limit` posts centred on one floor of a regular topic, from one request. */
   readAround(topic: number, floor: number, limit: number): Promise<Post[]>;
   /** The owner's own topics and replies plus posts mentioning the owner, newest first. */

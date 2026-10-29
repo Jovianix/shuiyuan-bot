@@ -8,7 +8,7 @@ export interface Config {
   dataDir: string; profilePath: string; mcpScript: string; httpGapMs: number;
   provider: string; model: string; timeoutMs: number; maxTokens: number;
   relatedLimit: number; contextChars: number; maxAttempts: number;
-  readCalls: number; readChars: number; readTotal: number; readSpan: number;
+  readCalls: number; readChars: number; readTotal: number; readSpan: number; imageBytes: number;
   controlSocket: string; workspace: string;
 }
 export function loadConfig(path: string): Config {
@@ -28,6 +28,9 @@ export function loadConfig(path: string): Config {
     // Model-initiated reads share the MCP child's single serial queue with scanning and
     // reconciliation, so one task may not spend the key's minute on its own curiosity.
     readCalls: 4, readChars: 6000, readTotal: 20_000, readSpan: 11,
+    // One image, as the forum stores it. Well under the harness's own 20 MiB admission cap:
+    // a post image past this size is a scan or a screenshot dump, not something to discuss.
+    imageBytes: 5 * 1024 * 1024,
     controlSocket: '/data/pet/control.sock', workspace: '/data/workspace', ...data,
   };
   const site = new URL(config.site);
@@ -35,9 +38,10 @@ export function loadConfig(path: string): Config {
   if (!/^[\w.-]+$/.test(config.owner) || !Number.isSafeInteger(config.ownerId) || config.ownerId <= 0) throw new Error('Configure owner and stable ownerId');
   if (!/^[\w-]+$/.test(config.petId) || !config.petName.trim() || /[【】\r\n]/u.test(config.petName)) throw new Error('Invalid pet identity');
   if (!['draft', 'reply'].includes(config.mode) || typeof config.scan !== 'boolean') throw new Error('Invalid mode or scan');
-  for (const key of ['scanIntervalMs', 'scanPageSize', 'catchUpMs', 'reconcileIntervalMs', 'reconcileWindowMs', 'httpGapMs', 'timeoutMs', 'maxTokens', 'contextChars', 'maxAttempts'] as const) {
+  for (const key of ['scanIntervalMs', 'scanPageSize', 'catchUpMs', 'reconcileIntervalMs', 'reconcileWindowMs', 'httpGapMs', 'timeoutMs', 'maxTokens', 'contextChars', 'maxAttempts', 'imageBytes'] as const) {
     if (!Number.isSafeInteger(config[key]) || config[key] <= 0) throw new Error(`Invalid ${key}`);
   }
+  if (config.imageBytes > 20 * 1024 * 1024) throw new Error('imageBytes must not exceed the 20 MiB attachment limit');
   if (!Number.isSafeInteger(config.relatedLimit) || config.relatedLimit < 0 || config.relatedLimit > 8) throw new Error('Invalid relatedLimit');
   for (const key of ['dataDir', 'profilePath', 'mcpScript', 'controlSocket', 'workspace'] as const) config[key] = resolve(config[key]);
   return Object.freeze(config);

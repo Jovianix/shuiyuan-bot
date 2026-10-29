@@ -1,7 +1,13 @@
 import type { Config } from './config.js';
-import type { ContextPack, Forum, Post, ThreadDirection } from './types.js';
+import type { ContextPack, Forum, ImageSaver, Post, StoredImage, ThreadDirection } from './types.js';
 import { readableTopics } from './payload.js';
-import { renderPost, stamp } from './format.js';
+import { extractUploads, renderPostWithUploads, stamp } from './format.js';
+
+/** One image block a tool result carries: the harness turns this into a model-visible image. */
+export interface ImageBlockLike {
+  type: 'image';
+  attachment: {attachmentId: string; mediaType: string; bytes: number; width: number; height: number; name?: string};
+}
 
 /**
  * The shape the DSH tool registry accepts: a model-facing schema plus a canonical
@@ -14,7 +20,7 @@ export interface ToolDefinitionLike {
   parameters: Record<string, unknown>;
   output: {
     schema: Record<string, unknown>;
-    render(args: unknown, value: unknown): {type: 'text'; text: string}[];
+    render(args: unknown, value: unknown): (ImageBlockLike | {type: 'text'; text: string})[];
   };
   execute(args: unknown, exec: unknown): Promise<unknown>;
 }
@@ -47,6 +53,45 @@ export function compileParameters(spec: Record<string, PropertySpec>): Record<st
 const text = (_args: unknown, value: unknown) => [{type: 'text' as const, text: (value as {text: string}).text}];
 
 /**
+ * Canonical value of an image read: a line for the model, plus the durable references its
+ * blocks are built from. The refs are plain JSON so they survive the registry's snapshot.
+ */
+export const IMAGE_RESULT = {
+  type: 'object',
+  properties: {
+    text: {type: 'string'},
+    images: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          attachmentId: {type: 'string'},
+          mediaType: {type: 'string'},
+          bytes: {type: 'integer'},
+          width: {type: 'integer'},
+          height: {type: 'integer'},
+        },
+        required: ['attachmentId', 'mediaType', 'bytes', 'width', 'height'],
+      },
+    },
+  },
+  required: ['text', 'images'],
+  additionalProperties: false,
+} as const;
+
+/**
+ * A text line followed by the images themselves, which is the whole point of the tool:
+ * the model reads what it asked to see instead of being told an image exists.
+ */
+const textAndImages = (_args: unknown, value: unknown) => {
+  const {text: line, images} = value as {text: string; images: StoredImage[]};
+  return [
+    {type: 'text' as const, text: line},
+    ...images.map(image => ({type: 'image' as const, attachment: image})),
+  ];
+};
+
+/**
  * The forum reads one task may make. Each tool costs exactly one MCP request, and the
  * whole turn shares one call budget and one character budget: the MCP child paces every
  * request globally, so an unbounded reader would starve the scanner and the reconciler.
@@ -55,8 +100,19 @@ export class Reader {
   private calls = 0;
   private chars = 0;
   private readonly topics: Set<number>;
-  constructor(readonly forum: Forum, readonly config: Config, pack: ContextPack) {
+  // Upload refs that appeared in a post this task has actually been shown. An image is a
+  // read like any other, so it stays inside the topics the task may read: a post cannot
+  // name some other upload the owner's key happens to unlock and have it fetched.
+  private readonly uploads = new Set<string>();
+  constructor(readonly forum: Forum, readonly config: Config, pack: ContextPack,
+    readonly images: ImageSaver = {save: async () => { throw new Error('图片存储不可用'); }}) {
     this.topics = readableTopics(pack);
+    for (const post of [pack.source, ...pack.related]) this.saw(post);
+  }
+
+  private saw(post: Post): Post {
+    for (const upload of extractUploads(post.raw)) this.uploads.add(upload.ref);
+    return post;
   }
 
   private charge(): void {
@@ -103,11 +159,11 @@ export class Reader {
     const numbers = wanted.map(post => post.post_number);
     const range = `\n\n（本次读到 #${Math.min(...numbers)}–#${Math.max(...numbers)}，共 ${wanted.length} 楼）`;
     // The range is charged too, so a bounded read cannot exceed the turn's budget.
-    return this.bound(wanted.map(post => renderPost(post)).join('\n\n'), range.length) + range;
+    return this.bound(wanted.map(post => renderPostWithUploads(this.saw(post))).join('\n\n'), range.length) + range;
   }
 
   definitions(): ToolDefinitionLike[] {
-    return [this.around(), this.byIds(), this.thread(), this.search(), this.topicInfo()];
+    return [this.around(), this.byIds(), this.thread(), this.search(), this.topicInfo(), this.readImages()];
   }
 
   /** A contiguous chunk of one topic, which is how a discussion is actually read. */
@@ -170,7 +226,7 @@ export class Reader {
         this.charge();
         const posts = (await this.forum.thread(post_id, direction)).filter(post => this.topics.has(post.topic_id));
         if (!posts.length) return {text: '这一楼没有读到可用的回复链。'};
-        return {text: this.bound(posts.map(post => renderPost(post)).join('\n\n'))};
+        return {text: this.bound(posts.map(post => renderPostWithUploads(this.saw(post))).join('\n\n'))};
       },
     };
   }
@@ -221,6 +277,61 @@ export class Reader {
         const lines = hits.slice(0, 20).map(post =>
           `#${post.post_number} ${post.username} ${stamp(post.created_at)} id=${post.id}\n${(post.raw ?? '').slice(0, 200)}`);
         return {text: this.bound(lines.join('\n\n'))};
+      },
+    };
+  }
+
+  /**
+   * The images a post references, as images. Model-initiated because most floors have none:
+   * fetching every upload on every call would spend vision tokens on pictures nobody asked
+   * about. Only refs from posts this task has already been shown are fetched.
+   */
+  private readImages(): ToolDefinitionLike {
+    return {
+      name: 'read_images',
+      description: '查看楼层里的图片。帖子正文下方的「[附图 N 张]」列出了这一楼的 upload:// 引用，原样传进来即可。'
+        + '图片和对方的问题有关、或者光看文字说不清它在讲什么时再看；纯文字就能聊的不必看。一次最多 4 张。',
+      parameters: compileParameters({
+        refs: {
+          type: 'array', items: {type: 'string'}, required: true,
+          description: '要看的 upload:// 引用，取自「[附图]」一行，最多 4 个',
+        },
+      }),
+      output: {schema: IMAGE_RESULT, render: textAndImages},
+      execute: async args => {
+        const {refs} = args as {refs: string[]};
+        const asked = [...new Set((Array.isArray(refs) ? refs : [])
+          .filter((ref): ref is string => typeof ref === 'string').map(ref => ref.trim()))];
+        if (!asked.some(ref => ref.startsWith('upload://'))) {
+          throw new Error('需要至少一个 upload:// 引用，照「[附图]」一行里的原样给。');
+        }
+        const unknown = asked.filter(ref => !this.uploads.has(ref));
+        const wanted = asked.filter(ref => this.uploads.has(ref)).slice(0, 4);
+        if (!wanted.length) {
+          throw new Error('这些引用不在已读到的楼层里。只能看调用帖和已读楼层「[附图]」里列出的图片。');
+        }
+        this.charge();
+        const images: StoredImage[] = [];
+        const failed: string[] = [];
+        for (const ref of wanted) {
+          try {
+            const upload = await this.forum.readUpload(ref, this.config.imageBytes);
+            // The name is display-only; the store verifies the bytes against the declared type.
+            images.push(await this.images.save({
+              data: upload.data, mediaType: upload.mediaType,
+              name: ref.slice('upload://'.length),
+            }));
+          } catch (error) {
+            failed.push(`${ref}（${error instanceof Error ? error.message : String(error)}）`);
+          }
+        }
+        const notes = [
+          ...(failed.length ? [`没读到：${failed.join('；')}`] : []),
+          ...(unknown.length ? [`不在已读楼层里、没有去取：${unknown.join('、')}`] : []),
+        ];
+        if (!images.length) return {text: `一张图也没读到。${notes.join('。')}。`, images: []};
+        const listing = images.map(image => `${image.name ?? '图片'}（${image.width}×${image.height}）`);
+        return {text: [`下面是 ${listing.join('、')}。`, ...notes].join('\n'), images};
       },
     };
   }

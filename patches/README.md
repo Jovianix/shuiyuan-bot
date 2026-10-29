@@ -42,6 +42,7 @@ HTTP 请求串行执行，前一个响应读取完成后至少等待 5 秒，
 | `discourse_filter_topics` | 提供 `meta.next_cursor`，保留上游页面尚未返回的条目 |
 | `discourse_get_post_replies` | 可选 `include_raw: true`，批量补读直接回复或上级回复的正文 |
 | `discourse_create_post` | 支持可选的 `reply_to_post_number`，单位是主题内楼层号 |
+| `discourse_read_upload`（新增） | 只读读取一张上传图片：接受 `upload://`、`/uploads/`、`/secure-uploads/`；带凭据请求站点，手动跟随一次 HTTPS 重定向到存储且不带凭据；只返回 png/jpeg/gif/webp 的 base64，`max_bytes` 默认 5 MiB |
 | 创建主题与回复 | 使用 `postNoRetry`，避免不确定的错误响应导致重复发帖 |
 
 主题选择最多返回 50 条、执行 5 次请求；达到请求预算时，

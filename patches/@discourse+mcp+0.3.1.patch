@@ -1,3 +1,30 @@
+diff --git a/node_modules/@discourse/mcp/dist/tools/builtin/catalog.js b/node_modules/@discourse/mcp/dist/tools/builtin/catalog.js
+index 226b92c..f103db5 100644
+--- a/node_modules/@discourse/mcp/dist/tools/builtin/catalog.js
++++ b/node_modules/@discourse/mcp/dist/tools/builtin/catalog.js
+@@ -16,6 +16,7 @@ import { updateTopicTool } from "./update_topic.js";
+ import { updatePostTool } from "./update_post.js";
+ import { updateUserTool } from "./update_user.js";
+ import { uploadFileTool } from "./upload_file.js";
++import { readUploadTool } from "./read_upload.js";
+ import { dataExplorerTools } from "./data_explorer/index.js";
+ import { privateMessageTools } from "./private_messages/index.js";
+ import { groupTools } from "./groups/index.js";
+@@ -67,6 +68,7 @@ export const builtinTools = [
+     updatePostTool,
+     updateUserTool,
+     uploadFileTool,
++    readUploadTool,
+     saveDraftTool,
+     deleteDraftTool,
+     ...dataExplorerTools,
+@@ -85,4 +87,3 @@ export const builtinTools = [
+     ...analyticsTools,
+     ...aiInsightTools,
+ ];
+\ No newline at end of file
+-//# sourceMappingURL=catalog.js.map
+\ No newline at end of file
 diff --git a/node_modules/@discourse/mcp/dist/tools/builtin/create_post.js b/node_modules/@discourse/mcp/dist/tools/builtin/create_post.js
 index 081fc62..5df669f 100644
 --- a/node_modules/@discourse/mcp/dist/tools/builtin/create_post.js
@@ -284,6 +311,148 @@ index 556522a..37d880b 100644
      },
  });
 -//# sourceMappingURL=read_topic.js.map
+\ No newline at end of file
+diff --git a/node_modules/@discourse/mcp/dist/tools/builtin/read_upload.d.ts b/node_modules/@discourse/mcp/dist/tools/builtin/read_upload.d.ts
+new file mode 100644
+index 0000000..e55984d
+--- /dev/null
++++ b/node_modules/@discourse/mcp/dist/tools/builtin/read_upload.d.ts
+@@ -0,0 +1 @@
++export declare const readUploadTool: import("../../definition.js").ToolDefinition;
+diff --git a/node_modules/@discourse/mcp/dist/tools/builtin/read_upload.js b/node_modules/@discourse/mcp/dist/tools/builtin/read_upload.js
+new file mode 100644
+index 0000000..362b6ce
+--- /dev/null
++++ b/node_modules/@discourse/mcp/dist/tools/builtin/read_upload.js
+@@ -0,0 +1,128 @@
++import { z } from "zod";
++import { defineTool } from "../definition.js";
++import { jsonResponse, jsonError, zodError, isZodError, withRateLimit } from "../../util/json_response.js";
++import { readAnnotations } from "./common/helpers.js";
++
++// Image types a model can actually consume. Anything else (svg, pdf, video) is refused
++// rather than passed through as an attachment the provider would reject later.
++const MEDIA_TYPES = {
++    png: "image/png",
++    jpg: "image/jpeg",
++    jpeg: "image/jpeg",
++    gif: "image/gif",
++    webp: "image/webp",
++};
++
++// The two path prefixes Discourse serves uploads under. A short URL redirects to
++// storage; a secure-upload path is the cooked form and redirects to the same object.
++const ALLOWED_PREFIXES = ["/uploads/", "/secure-uploads/"];
++
++/**
++ * Normalize any of the three forms a caller can hold into a site-relative path:
++ * `upload://name.ext` (the raw markdown target), `/uploads/short-url/name.ext`,
++ * or `/secure-uploads/original/...`.
++ */
++function uploadPath(input) {
++    if (typeof input !== "string" || input.length === 0) {
++        throw new Error("upload_url must be a non-empty string");
++    }
++    const value = input.trim();
++    if (value.startsWith("upload://")) {
++        const name = value.slice("upload://".length);
++        if (!/^[\w.-]+$/.test(name) || name.includes("..")) {
++            throw new Error("upload:// reference must be a plain file name");
++        }
++        return "/uploads/short-url/" + name;
++    }
++    if (!ALLOWED_PREFIXES.some((prefix) => value.startsWith(prefix))) {
++        throw new Error(`Only ${ALLOWED_PREFIXES.join(" and ")} paths may be read`);
++    }
++    // Reject traversal and absolute URLs smuggled past the prefix check.
++    if (value.includes("..") || value.includes("?") || value.includes("#")) {
++        throw new Error("Upload path may not contain a query, fragment or parent segment");
++    }
++    return value;
++}
++
++function extensionOf(path) {
++    const match = /\.([A-Za-z0-9]+)$/.exec(path);
++    return match ? match[1].toLowerCase() : "";
++}
++
++/** Redirect targets are only followed when they are plain HTTPS URLs. */
++function redirectTarget(location, base) {
++    const target = new URL(location, base);
++    if (target.protocol !== "https:") throw new Error("Upload redirect must use HTTPS");
++    return target.toString();
++}
++
++const schema = z.object({
++    upload_url: z.string().min(1).describe("upload://<name>.<ext> from a post body, or a /uploads/ or /secure-uploads/ path"),
++    max_bytes: z.number().int().positive().max(20 * 1024 * 1024).optional().describe("Refuse uploads larger than this; default 5 MiB"),
++});
++
++export const readUploadTool = defineTool({
++    name: "discourse_read_upload",
++    title: "Read Upload",
++    description: "Read one uploaded image's bytes with the caller's own credentials, following the redirect to storage. Returns base64 for images only. Read-only: it fetches, it never writes.",
++    schema,
++    availability: "always",
++    toolsets: ["topics"],
++    annotations: readAnnotations(),
++    handler: async (input, _extra, ctx) => {
++        try {
++            const args = schema.parse(input);
++            const path = uploadPath(args.upload_url);
++            const mediaType = MEDIA_TYPES[extensionOf(path)];
++            if (!mediaType) {
++                return jsonError("Not an image upload. Only png, jpeg, gif and webp can be read.");
++            }
++            const limit = args.max_bytes ?? 5 * 1024 * 1024;
++            const { base, client } = ctx.siteState.ensureSelectedSite();
++            // The site hop carries the caller's credentials; the storage hop must not.
++            // Both are manual so the redirect target can be checked before it is fetched.
++            const first = await withRateLimit(`discourse-api:${base}`, () => fetch(new URL(path, base), {
++                method: "GET",
++                headers: { ...client.headers(), Accept: mediaType },
++                redirect: "manual",
++            }), 200);
++            let response = first;
++            if (first.status >= 300 && first.status < 400) {
++                const location = first.headers.get("location");
++                if (!location) {
++                    await first.arrayBuffer();
++                    throw new Error("Upload redirect carried no location");
++                }
++                const target = redirectTarget(location, base);
++                await first.arrayBuffer();
++                response = await fetch(target, { method: "GET", headers: { Accept: mediaType }, redirect: "error" });
++            }
++            if (!response.ok) {
++                await response.arrayBuffer();
++                return jsonError(`Upload is not readable (HTTP ${response.status})`, { status: response.status });
++            }
++            const declared = (response.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
++            // The stored object's type wins over the extension when the server sends one.
++            const type = declared.startsWith("image/") ? declared : mediaType;
++            if (!Object.values(MEDIA_TYPES).includes(type)) {
++                await response.arrayBuffer();
++                return jsonError(`Upload is ${declared || "of unknown type"}, not an image`);
++            }
++            const bytes = Buffer.from(await response.arrayBuffer());
++            if (bytes.byteLength > limit) {
++                return jsonError(`Upload is ${bytes.byteLength} bytes, above the ${limit} byte limit`);
++            }
++            return jsonResponse({
++                path,
++                media_type: type,
++                bytes: bytes.byteLength,
++                data: bytes.toString("base64"),
++            });
++        }
++        catch (e) {
++            if (isZodError(e))
++                return zodError(e);
++            return jsonError(`Failed to read upload: ${e?.message || String(e)}`);
++        }
++    },
++});
 \ No newline at end of file
 diff --git a/node_modules/@discourse/mcp/dist/tools/builtin/search.js b/node_modules/@discourse/mcp/dist/tools/builtin/search.js
 index a198c9e..4f9fd13 100644

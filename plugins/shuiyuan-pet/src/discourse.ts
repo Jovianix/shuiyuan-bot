@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import type { Config } from './config.js';
-import type { Activity, CreatedPost, Forum, Post, PostHead, ThreadDirection, TopicInfo } from './types.js';
+import type { Activity, CreatedPost, Forum, Post, PostHead, ThreadDirection, TopicInfo, UploadedImage } from './types.js';
 import { ForumError, PermanentError } from './types.js';
 
 export class Discourse implements Forum {
@@ -156,6 +156,22 @@ export class Discourse implements Forum {
         created_at: typeof p.created_at === 'string' ? p.created_at : '',
         raw: p.raw ?? p.excerpt ?? p.blurb ?? '',
       }));
+  }
+  /**
+   * One upload's bytes. The MCP child owns the credential and the two-hop policy: it
+   * follows only the redirect the forum itself returned, and only to a host that redirect
+   * named. Nothing about the size or type is trusted from the caller's request.
+   */
+  async readUpload(url: string, maxBytes: number): Promise<UploadedImage> {
+    const data = await this.call<{media_type?: unknown; data?: unknown; bytes?: unknown}>(
+      'discourse_read_upload', {upload_url: url, max_bytes: maxBytes});
+    if (typeof data.media_type !== 'string' || !data.media_type.startsWith('image/') || typeof data.data !== 'string') {
+      throw new PermanentError('Upload is not a readable image');
+    }
+    const bytes = Buffer.from(data.data, 'base64');
+    // The declared length is only a claim; the decoded bytes are what gets handed on.
+    if (!bytes.byteLength || bytes.byteLength > maxBytes) throw new PermanentError('Upload is empty or too large');
+    return {mediaType: data.media_type, data: new Uint8Array(bytes)};
   }
   /** One create request. The server's own response is the verification; no read-back. */
   async send(topic: number, parent: number, raw: string): Promise<CreatedPost> {

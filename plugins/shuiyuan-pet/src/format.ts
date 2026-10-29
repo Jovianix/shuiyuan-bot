@@ -6,6 +6,23 @@ import type { Post } from './types.js';
  */
 const SIGNATURE = /<div\s+data-signature>[\s\S]*?<\/div>/gi;
 
+/**
+ * Discourse stores an inserted image as `upload://<name>.<ext>` and swaps in a real path
+ * when it cooks the post. The short form is what a post body carries, and it is the
+ * handle the image reader takes.
+ */
+const UPLOAD = /!\[([^\]]*)\]\(upload:\/\/([\w.-]+?)\)/gi;
+
+/** The uploads a post references, in body order, each with the model's own alt text. */
+export function extractUploads(raw: string): {ref: string; alt: string}[] {
+  return [...raw.matchAll(UPLOAD)].map(match => ({
+    ref: `upload://${match[2]}`,
+    // Alt text is `name|WxH, scale%`; only the name means anything to a reader. Discourse
+    // also escapes some punctuation in it (`IMG\_1216`), which is undone here.
+    alt: match[1]!.split('|')[0]!.replace(/\\(.)/g, '$1').trim(),
+  }));
+}
+
 export function stripSignature(raw: string): string {
   return raw.replace(SIGNATURE, '').trim();
 }
@@ -34,6 +51,24 @@ export function renderPost(post: Post, bodyLimit = Number.POSITIVE_INFINITY): st
   const raw = stripSignature(post.raw);
   const body = raw.length > bodyLimit ? `${raw.slice(0, bodyLimit)}…` : raw;
   return `#${post.post_number} (id ${post.id}) ${author(post)} ${stamp(post.created_at)}${reply}\n${body}`;
+}
+
+/**
+ * The images a post holds, stated once below its body. Buried in markdown, an
+ * `upload://…` target is easy to miss and its alt text is escaped; this line is the
+ * fact, and the image reader's description says what can be done with it.
+ */
+export function describeUploads(raw: string): string {
+  const uploads = extractUploads(raw);
+  if (!uploads.length) return '';
+  const lines = uploads.map(upload => `${upload.ref}${upload.alt ? `（${upload.alt}）` : ''}`);
+  return `[附图 ${uploads.length} 张] ${lines.join('；')}`;
+}
+
+/** A post as the model reads it: the compact header and body, then its images if any. */
+export function renderPostWithUploads(post: Post): string {
+  const uploads = describeUploads(post.raw);
+  return uploads ? `${renderPost(post)}\n${uploads}` : renderPost(post);
 }
 
 /** A referenced floor the model has not read: enough to decide whether it is worth a call. */

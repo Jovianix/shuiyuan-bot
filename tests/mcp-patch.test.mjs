@@ -349,3 +349,65 @@ test('read-only registration and execution still reject all mutation tools', asy
   assert.ok(names.every(name => !writes.has(name)));
   assert.ok((await invoke('discourse_create_post', { topic_id: 77, raw: 'test', reply_to_post_number: 42 }, setup)).error);
 });
+
+// discourse_read_upload: the site hop carries credentials, the storage hop does not, and
+// only image types come back.
+function uploadFixture(t, respond) {
+  const requests = [];
+  t.mock.method(globalThis, 'fetch', async (url, init = {}) => {
+    const target = String(url);
+    requests.push({url: target, headers: init.headers ?? {}, redirect: init.redirect});
+    return respond(new URL(target), init);
+  });
+  const client = new HttpClient({
+    baseUrl: 'https://forum.invalid', timeoutMs: 1000,
+    auth: { type: 'user_api_key', key: 'secret-key', client_id: 'client' },
+    logger: { debug() {}, error() {}, info() {} },
+  });
+  const setup = fixture(() => assert.fail('JSON GET is not used'));
+  setup.ctx.siteState.ensureSelectedSite = () => ({ base: 'https://forum.invalid', client });
+  return { setup, requests };
+}
+const JPEG = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3]);
+
+test('read_upload resolves upload:// through the site, then fetches storage without credentials', async t => {
+  const { setup, requests } = uploadFixture(t, url => url.host === 'forum.invalid'
+    ? new Response(null, { status: 302, headers: { location: 'https://storage.invalid/original/x.jpeg?sig=1' } })
+    : new Response(JPEG, { headers: { 'content-type': 'image/jpeg' } }));
+  const result = await invoke('discourse_read_upload', { upload_url: 'upload://abc123.jpeg' }, setup);
+  assert.equal(result.error, false);
+  assert.equal(result.media_type, 'image/jpeg');
+  assert.equal(result.bytes, JPEG.byteLength);
+  assert.deepEqual(new Uint8Array(Buffer.from(result.data, 'base64')), JPEG);
+  assert.equal(requests[0].url, 'https://forum.invalid/uploads/short-url/abc123.jpeg');
+  assert.equal(requests[0].headers['User-Api-Key'], 'secret-key');
+  assert.equal(requests[0].redirect, 'manual');
+  assert.equal(requests[1].url, 'https://storage.invalid/original/x.jpeg?sig=1');
+  assert.equal(requests[1].headers['User-Api-Key'], undefined);
+});
+
+test('read_upload refuses non-images, foreign paths and oversize bodies', async t => {
+  const { setup, requests } = uploadFixture(t, () =>
+    new Response(new Uint8Array(64), { headers: { 'content-type': 'image/png' } }));
+  for (const upload_url of ['upload://a.svg', 'upload://a.pdf', 'https://evil.invalid/a.png', '/t/1.json',
+    '/uploads/../admin.png', 'upload://../x.png']) {
+    assert.ok((await invoke('discourse_read_upload', { upload_url }, setup)).error, upload_url);
+  }
+  assert.equal(requests.length, 0);
+  assert.ok((await invoke('discourse_read_upload', { upload_url: 'upload://big.png', max_bytes: 16 }, setup)).error);
+});
+
+test('read_upload reports an unreadable upload without retrying it', async t => {
+  const { setup, requests } = uploadFixture(t, () => new Response('gone', { status: 404 }));
+  const result = await invoke('discourse_read_upload', { upload_url: 'upload://gone.png' }, setup);
+  assert.match(result.error, /HTTP 404/);
+  assert.equal(result.status, 404);
+  assert.equal(requests.length, 1);
+});
+
+test('read_upload is a read-only topics tool, registered without writes', () => {
+  const tool = catalog.get('discourse_read_upload');
+  assert.equal(tool.availability, 'always');
+  assert.deepEqual(tool.toolsets, ['topics']);
+  assert.equal(tool.annotations.readOnlyHint, true);
+});

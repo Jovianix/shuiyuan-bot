@@ -1,6 +1,6 @@
 import type { Config } from './config.js';
 import type { ContextPack, Post } from './types.js';
-import { renderPost } from './format.js';
+import { renderPostWithUploads } from './format.js';
 
 /**
  * The one user message a task sends. A previous version serialized the whole
@@ -22,10 +22,10 @@ export function renderPayload(input: ContextPack, config: Config): string {
       + `read_posts（按帖子 ID）、read_thread（回复链）或 search；信息够了就直接回答，不要为了完整反复读取。`,
     '',
     '[调用帖]',
-    renderPost(source),
+    renderPostWithUploads(source),
   ];
   if (input.related.length) {
-    parts.push('', '[随调用一并取到的相关楼层]', ...input.related.map(post => renderPost(post)));
+    parts.push('', '[随调用一并取到的相关楼层]', ...input.related.map(post => renderPostWithUploads(post)));
   }
   if (input.missing.length) {
     parts.push('', '[未取到的引用]', ...input.missing.map(ref => `${ref}（没有读到，需要时可以按楼层读取）`));
