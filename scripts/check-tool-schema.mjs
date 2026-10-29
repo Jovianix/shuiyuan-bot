@@ -15,7 +15,7 @@ const toolsRoot = dirname(require.resolve('@deepseek-ai/dsh-tools/package.json')
 const {assertSupportedJsonSchema} = await import(pathToFileURL(join(toolsRoot, 'lib/types/json-schema.js')).href);
 const {Reader} = await import('/repo/plugins/shuiyuan-pet/dist/tools.js');
 
-const config = {readCalls: 4, readChars: 6000, readTotal: 20000, readSpan: 11};
+const config = {readChars: 6000, readSpan: 11};
 const pack = {source: {topic_id: 77, raw: ''}, related: [], missing: [], truncated: [], sourceHash: 'x'};
 const reader = new Reader({}, config, pack);
 

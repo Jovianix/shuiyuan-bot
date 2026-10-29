@@ -360,9 +360,9 @@ test('signature blocks are stripped from what the model reads but not from the s
 test('readable topics are the source topic and every topic already in context',()=>{
   assert.deepEqual([...readableTopics({source:post(1,{topic_id:77}),related:[post(2,{topic_id:88})],missing:[],truncated:[],sourceHash:'h'})].sort(),[77,88]);
 });
-test('reader tools refuse other topics, charge the call budget, and cap the characters',async()=>{
+test('reader tools refuse other topics and bound one result without capping the turn',async()=>{
   const forum=forumStub();
-  const reader=new Reader(forum,{...config,readCalls:2,readChars:50,readTotal:60,readSpan:11},
+  const reader=new Reader(forum,{...config,readChars:100,readSpan:11},
     {source:post(1,{topic_id:77}),related:[],missing:[],truncated:[],sourceHash:'h'});
   const tools=Object.fromEntries(reader.definitions().map(tool=>[tool.name,tool]));
   assert.deepEqual(Object.keys(tools).sort(),['read_around','read_images','read_posts','read_thread','read_topic','search']);
@@ -371,11 +371,14 @@ test('reader tools refuse other topics, charge the call budget, and cap the char
   assert.equal(forum.reads.length,0);
   const first=await tools.read_around.execute({topic_id:77,post_number:1,span:3},{});
   assert.deepEqual(forum.reads[0],['readAround',77,1,3]);
-  assert.ok(first.text.length<=50||first.text.includes('截断'));
+  // One result is truncated with a note that says how to continue, not with a refusal.
+  assert.ok(first.text.length<=100,first.text);
+  assert.match(first.text,/截断/);
   await tools.read_thread.execute({post_id:2,direction:'ancestors'},{});
-  // The third call in one turn is refused rather than quietly costing another request.
-  await assert.rejects(tools.search.execute({query:'天空'},{}),/达到上限/);
-  assert.equal(forum.reads.length,2);
+  // No turn-wide call cap: a fourth and fifth read still reach the forum.
+  await tools.search.execute({query:'天空'},{});
+  await tools.read_topic.execute({topic_id:77},{});
+  assert.equal(forum.reads.length,4);
 });
 test('reader tools reject malformed arguments instead of trusting the model',async()=>{
   const reader=new Reader(forumStub(),config,{source:post(1),related:[],missing:[],truncated:[],sourceHash:'h'});
@@ -391,7 +394,7 @@ test('read_images fetches only refs from posts the task has seen, and answers wi
   const images={save:async input=>{saved.push(input);
     return {attachmentId:`att-${saved.length}`,mediaType:input.mediaType,bytes:input.data.byteLength,width:621,height:435,name:input.name};}};
   const source=post(1,{raw:'看图\n![a](upload://a.jpeg)\n![m](upload://missing.png)'});
-  const reader=new Reader(forum,{...config,readCalls:10,readChars:6000,readTotal:50_000,readSpan:11,imageBytes:1024},
+  const reader=new Reader(forum,{...config,readChars:6000,readSpan:11,imageBytes:1024},
     {source,related:[],missing:[],truncated:[],sourceHash:'h'},images);
   const tools=Object.fromEntries(reader.definitions().map(tool=>[tool.name,tool]));
   // Not an upload ref at all: refused before any request.
@@ -420,7 +423,7 @@ test('read_images fetches only refs from posts the task has seen, and answers wi
 test('read_images takes at most four images per call',async()=>{
   const forum=forumStub();
   const raw=[1,2,3,4,5].map(n=>`![${n}](upload://${n}.png)`).join('\n');
-  const reader=new Reader(forum,{...config,readCalls:10,readChars:6000,readTotal:50_000},{source:post(1,{raw}),related:[],missing:[],truncated:[],sourceHash:'h'},
+  const reader=new Reader(forum,config,{source:post(1,{raw}),related:[],missing:[],truncated:[],sourceHash:'h'},
     {save:async input=>({attachmentId:input.name,mediaType:input.mediaType,bytes:1,width:1,height:1,name:input.name})});
   const tool=reader.definitions().find(t=>t.name==='read_images');
   await tool.execute({refs:[1,2,3,4,5].map(n=>`upload://${n}.png`)},{});

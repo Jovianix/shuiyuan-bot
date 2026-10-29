@@ -93,12 +93,13 @@ const textAndImages = (_args: unknown, value: unknown) => {
 
 /**
  * The forum reads one task may make. Each tool costs exactly one MCP request, and the
- * whole turn shares one call budget and one character budget: the MCP child paces every
- * request globally, so an unbounded reader would starve the scanner and the reconciler.
+ * MCP child runs every request serially and backs off when the forum answers 429, so how
+ * many reads a task makes is a question of time and of what the discussion needs,
+ * not of a counter. The reader bounds only what the model asks for: the topics it may
+ * touch and the shape of each argument. Deciding when it has read enough is the model's
+ * judgement, made from the tool descriptions and from what it already has.
  */
 export class Reader {
-  private calls = 0;
-  private chars = 0;
   private readonly topics: Set<number>;
   // Upload refs that appeared in a post this task has actually been shown. An image is a
   // read like any other, so it stays inside the topics the task may read: a post cannot
@@ -115,26 +116,18 @@ export class Reader {
     return post;
   }
 
-  private charge(): void {
-    if (this.calls >= this.config.readCalls) {
-      throw new Error(`本轮已经读了 ${this.config.readCalls} 次，达到上限。请用手上已有的内容回答。`);
-    }
-    this.calls++;
-  }
-
-  /** Room left in the turn's character budget, never more than one result's cap. */
-  private room(): number {
-    const left = Math.min(this.config.readChars, this.config.readTotal - this.chars);
-    if (left <= 0) throw new Error('本轮读取的正文总量已达上限。请用手上已有的内容回答。');
-    return left;
-  }
-
-  /** `reserve` keeps room for a suffix the caller appends after bounding the body. */
-  private bound(body: string, reserve = 0): string {
-    const room = this.room() - reserve;
-    const out = body.length > room ? `${body.slice(0, Math.max(0, room))}\n…（后续内容因预算截断）` : body;
-    this.chars += out.length;
-    return out;
+  /**
+   * One result, bounded only so that a single call cannot fill the model's context:
+   * the tail loses characters, never the call. The note says how to get the rest, so a
+   * truncated result stays useful instead of looking like the end of the discussion.
+   * `reserve` keeps room for a suffix the caller appends after this, so the whole result
+   * still fits the cap.
+   */
+  private fit(body: string, more = '可以换一个楼层号或更小的 span 再读', reserve = 0): string {
+    const limit = this.config.readChars - reserve;
+    if (body.length <= limit) return body;
+    const note = `\n\n…（已截断，单次上限 ${this.config.readChars} 字；${more}）`;
+    return body.slice(0, Math.max(0, limit - note.length)) + note;
   }
 
   private topic(id: unknown): number {
@@ -146,8 +139,8 @@ export class Reader {
 
   /**
    * Rendered floors, or a note that says why there were none. An empty result previously
-   * read as "this floor does not exist", so a model would probe 20, then 1, then give up,
-   * spending its call budget on floors that were simply outside the topic.
+   * read as "this floor does not exist", so a model would probe 20, then 1, then give up
+   * on floors that were simply outside the topic.
    */
   private floors(topic: number, posts: Post[], asked?: {floors?: number[]; ids?: number[]}): string {
     const wanted = posts.filter(post => post.topic_id === topic);
@@ -158,8 +151,7 @@ export class Reader {
     }
     const numbers = wanted.map(post => post.post_number);
     const range = `\n\n（本次读到 #${Math.min(...numbers)}–#${Math.max(...numbers)}，共 ${wanted.length} 楼）`;
-    // The range is charged too, so a bounded read cannot exceed the turn's budget.
-    return this.bound(wanted.map(post => renderPostWithUploads(this.saw(post))).join('\n\n'), range.length) + range;
+    return this.fit(wanted.map(post => renderPostWithUploads(this.saw(post))).join('\n\n'), undefined, range.length) + range;
   }
 
   definitions(): ToolDefinitionLike[] {
@@ -170,7 +162,10 @@ export class Reader {
   private around(): ToolDefinitionLike {
     return {
       name: 'read_around',
-      description: '读取某个主题中某一楼附近的连续楼层，用于了解一段讨论的前后文。一次读取返回一段连续楼层。',
+      description: '读取某个主题中某一楼附近的连续楼层，用于了解一段讨论的前后文。一次读取返回一段连续楼层。'
+        + `默认取 ${this.config.readSpan} 楼（目标楼层前的几楼也会带上），span 最大 50。`
+        + `单次结果超过 ${this.config.readChars} 字会被截断，` + '那时换一个更靠近的楼层号或用更小的 span 分批读。'
+        + '调用帖和已随上下文给出的楼层不必重复读。',
       parameters: compileParameters({
         topic_id: {type: 'integer', required: true, description: '主题 ID'},
         post_number: {type: 'integer', required: true, description: '目标楼层号'},
@@ -182,7 +177,6 @@ export class Reader {
         const topic = this.topic(topic_id);
         if (!Number.isSafeInteger(post_number) || post_number <= 0) throw new Error('楼层号必须是正整数。');
         const limit = Math.min(Math.max(1, span ?? this.config.readSpan), 50);
-        this.charge();
         return {text: this.floors(topic, await this.forum.readAround(topic, post_number, limit), {floors: [post_number]})};
       },
     };
@@ -192,7 +186,8 @@ export class Reader {
   private byIds(): ToolDefinitionLike {
     return {
       name: 'read_posts',
-      description: '按帖子 ID 精确读取若干楼层。ID 取自已有内容中标注的 id，一次最多 50 个。',
+      description: '按帖子 ID 精确读取若干楼层。ID 取自已有内容中标注的 id，一次最多 50 个，一次请求读满。'
+        + '要读的楼层散在主题各处、或者从 search 结果和引用里挑出了具体几帖时用它，比按楼层号一段段翻准。',
       parameters: compileParameters({
         topic_id: {type: 'integer', required: true, description: '主题 ID'},
         post_ids: {type: 'array', items: {type: 'integer'}, required: true, description: '帖子 ID 列表'},
@@ -203,7 +198,6 @@ export class Reader {
         const topic = this.topic(topic_id);
         const ids = [...new Set(post_ids.filter(id => Number.isSafeInteger(id) && id > 0))].slice(0, 50);
         if (!ids.length) throw new Error('需要至少一个有效的帖子 ID。');
-        this.charge();
         return {text: this.floors(topic, await this.forum.readByIds(topic, ids), {ids})};
       },
     };
@@ -213,7 +207,8 @@ export class Reader {
   private thread(): ToolDefinitionLike {
     return {
       name: 'read_thread',
-      description: '读取某一楼的回复链：ancestors 取它回复的上层楼层，replies 取直接回复它的楼层。',
+      description: '读取某一楼的回复链：ancestors 取它回复的上层楼层，replies 取直接回复它的楼层。'
+        + '上下文里的 →# 箭头只标出直接父楼层，那道父帖之外的来龙去脉、或者有人接着某一楼继续吵下去时，用它补齐。',
       parameters: compileParameters({
         post_id: {type: 'integer', required: true, description: '帖子 ID'},
         direction: {type: 'string', enum: ['ancestors', 'replies'], required: true, description: 'ancestors 向上，replies 向下'},
@@ -223,10 +218,9 @@ export class Reader {
         const {post_id, direction} = args as {post_id: number; direction: ThreadDirection};
         if (!Number.isSafeInteger(post_id) || post_id <= 0) throw new Error('帖子 ID 必须是正整数。');
         if (direction !== 'ancestors' && direction !== 'replies') throw new Error('direction 只能是 ancestors 或 replies。');
-        this.charge();
         const posts = (await this.forum.thread(post_id, direction)).filter(post => this.topics.has(post.topic_id));
         if (!posts.length) return {text: '这一楼没有读到可用的回复链。'};
-        return {text: this.bound(posts.map(post => renderPostWithUploads(this.saw(post))).join('\n\n'))};
+        return {text: this.fit(posts.map(post => renderPostWithUploads(this.saw(post))).join('\n\n'))};
       },
     };
   }
@@ -238,7 +232,8 @@ export class Reader {
   private topicInfo(): ToolDefinitionLike {
     return {
       name: 'read_topic',
-      description: '读取主题的标题、分类、标签和总楼层数，用来判断这段讨论在讲什么、有多大。',
+      description: '读取主题的标题、分类、标签和总楼层数，用来判断这段讨论在讲什么、有多大。'
+        + '帖子接口不返回主题标题，这是唯一能看到标题的途径；想知道“这帖在聊什么”或判断值不值得往下翻时先读它。',
       parameters: compileParameters({
         topic_id: {type: 'integer', required: true, description: '主题 ID'},
       }),
@@ -246,14 +241,13 @@ export class Reader {
       execute: async args => {
         const {topic_id} = args as {topic_id: number};
         const id = this.topic(topic_id);
-        this.charge();
         const info = await this.forum.topicInfo(id);
         const lines = [
           `主题 ${info.id}：${info.title}`,
           `共 ${info.postsCount} 楼${info.highestPostNumber ? `，最高楼层 #${info.highestPostNumber}` : ''}`,
         ];
         if (info.tags.length) lines.push(`标签：${info.tags.join('、')}`);
-        return {text: this.bound(lines.join('\n'))};
+        return {text: this.fit(lines.join('\n'))};
       },
     };
   }
@@ -262,7 +256,9 @@ export class Reader {
   private search(): ToolDefinitionLike {
     return {
       name: 'search',
-      description: '在本次调用相关的主题范围内搜索帖子关键词，返回匹配楼层的楼层号、作者与摘要。',
+      description: '在本次调用相关的主题范围内搜索帖子关键词，返回匹配楼层的楼层号、作者与摘要。'
+        + '摘要只是预览，看完想细读的楼层再用 read_posts 取全文。搜的是论坛原文，'
+        + '不确定讨论里是否提过某个词或某个人时用它，比逐段翻楼省事。',
       parameters: compileParameters({
         query: {type: 'string', required: true, description: '搜索关键词'},
       }),
@@ -271,12 +267,11 @@ export class Reader {
         const {query} = args as {query: string};
         const q = (query ?? '').trim();
         if (!q) throw new Error('搜索词不能为空。');
-        this.charge();
         const hits = (await this.forum.searchPosts(q)).filter(post => this.topics.has(post.topic_id));
         if (!hits.length) return {text: '相关主题里没有搜到匹配的楼层。'};
         const lines = hits.slice(0, 20).map(post =>
           `#${post.post_number} ${post.username} ${stamp(post.created_at)} id=${post.id}\n${(post.raw ?? '').slice(0, 200)}`);
-        return {text: this.bound(lines.join('\n\n'))};
+        return {text: this.fit(lines.join('\n\n'), '可以换个更具体的关键词')};
       },
     };
   }
@@ -310,7 +305,6 @@ export class Reader {
         if (!wanted.length) {
           throw new Error('这些引用不在已读到的楼层里。只能看调用帖和已读楼层「[附图]」里列出的图片。');
         }
-        this.charge();
         const images: StoredImage[] = [];
         const failed: string[] = [];
         for (const ref of wanted) {
